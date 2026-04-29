@@ -1,0 +1,30 @@
+[Unit]
+Description=YOLO Inference Pipeline (Jetson / Docker)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=esa_jetson
+Environment=HOME=/home/esa_jetson
+
+# Start the existing container, then run inference headless
+ExecStartPre=/usr/bin/docker start yolo-saad
+ExecStart=/usr/bin/docker exec yolo-saad python3 /workspace/inference.py --no-display
+
+# On stop: kill the python process inside the container gracefully
+ExecStop=/usr/bin/docker exec yolo-saad pkill -TERM -f "python3 /workspace/inference.py"
+KillMode=mixed
+TimeoutStopSec=15
+
+# Auto-restart on crash (10s cooldown)
+Restart=on-failure
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=yolo-inference
+
+[Install]
+WantedBy=multi-user.target

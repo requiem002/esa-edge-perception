@@ -1,0 +1,280 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 820" font-family="'Segoe UI', Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="10" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,3 L0,6 Z" fill="#475569"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="10" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,3 L0,6 Z" fill="#16a34a"/>
+    </marker>
+    <marker id="arrow-orange" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="10" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,3 L0,6 Z" fill="#ea580c"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="10" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,3 L0,6 Z" fill="#2563eb"/>
+    </marker>
+    <linearGradient id="headerGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#334155"/>
+    </linearGradient>
+    <linearGradient id="jetsonGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f0fdf4"/>
+      <stop offset="100%" stop-color="#dcfce7"/>
+    </linearGradient>
+    <linearGradient id="dockerGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#eff6ff"/>
+      <stop offset="100%" stop-color="#dbeafe"/>
+    </linearGradient>
+    <filter id="shadow" x="-4%" y="-4%" width="108%" height="112%">
+      <feDropShadow dx="1" dy="2" stdDeviation="3" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1100" height="820" rx="12" fill="#f8fafc"/>
+
+  <!-- Title bar -->
+  <rect x="0" y="0" width="1100" height="52" rx="12" fill="url(#headerGrad)"/>
+  <rect x="0" y="24" width="1100" height="28" fill="url(#headerGrad)"/>
+  <text x="550" y="34" text-anchor="middle" fill="white" font-size="18" font-weight="700" letter-spacing="1">YOLO INFERENCE PIPELINE — JETSON / ROBOT DOG</text>
+
+  <!-- ============== ROBOT DOG OUTLINE ============== -->
+  <rect x="20" y="68" width="280" height="200" rx="10" fill="#fefce8" stroke="#ca8a04" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="160" y="92" text-anchor="middle" fill="#854d0e" font-size="13" font-weight="700">UNITREE ROBOT DOG</text>
+
+  <!-- Camera -->
+  <rect x="40" y="108" width="120" height="56" rx="8" fill="white" stroke="#ca8a04" stroke-width="1.2"/>
+  <text x="100" y="133" text-anchor="middle" fill="#854d0e" font-size="12" font-weight="600">Camera</text>
+  <text x="100" y="152" text-anchor="middle" fill="#a16207" font-size="10">/dev/video0</text>
+
+  <!-- Jetson on dog -->
+  <rect x="180" y="108" width="105" height="56" rx="8" fill="#bbf7d0" stroke="#16a34a" stroke-width="1.2"/>
+  <text x="232" y="130" text-anchor="middle" fill="#166534" font-size="11" font-weight="600">Jetson Orin</text>
+  <text x="232" y="146" text-anchor="middle" fill="#15803d" font-size="9">CUDA 12.2</text>
+  <text x="232" y="158" text-anchor="middle" fill="#15803d" font-size="9">TensorRT</text>
+
+  <!-- Camera to Jetson arrow -->
+  <line x1="160" y1="136" x2="177" y2="136" stroke="#ca8a04" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="168" y="128" text-anchor="middle" fill="#a16207" font-size="8">USB/CSI</text>
+
+  <!-- Power note -->
+  <text x="160" y="245" text-anchor="middle" fill="#92400e" font-size="10" font-style="italic">Mounted on chassis, powered by dog battery</text>
+
+  <!-- ============== JETSON HOST ============== -->
+  <rect x="320" y="68" width="760" height="370" rx="10" fill="url(#jetsonGrad)" stroke="#16a34a" stroke-width="1.8" filter="url(#shadow)"/>
+  <text x="700" y="92" text-anchor="middle" fill="#166534" font-size="14" font-weight="700">NVIDIA JETSON ORIN — Host OS (Ubuntu 22.04, JetPack R36)</text>
+
+  <!-- systemd -->
+  <rect x="340" y="108" width="200" height="80" rx="8" fill="white" stroke="#7c3aed" stroke-width="1.3" filter="url(#shadow)"/>
+  <rect x="340" y="108" width="200" height="24" rx="8" fill="#7c3aed"/>
+  <rect x="340" y="120" width="200" height="12" fill="#7c3aed"/>
+  <text x="440" y="124" text-anchor="middle" fill="white" font-size="11" font-weight="600">systemd</text>
+  <text x="440" y="150" text-anchor="middle" fill="#6d28d9" font-size="10" font-weight="600">yolo-inference.service</text>
+  <text x="440" y="165" text-anchor="middle" fill="#7c3aed" font-size="9">Auto-start on boot</text>
+  <text x="440" y="178" text-anchor="middle" fill="#7c3aed" font-size="9">Restart on crash (10s)</text>
+
+  <!-- sysfs thermal -->
+  <rect x="560" y="108" width="160" height="80" rx="8" fill="white" stroke="#ea580c" stroke-width="1.3" filter="url(#shadow)"/>
+  <rect x="560" y="108" width="160" height="24" rx="8" fill="#ea580c"/>
+  <rect x="560" y="120" width="160" height="12" fill="#ea580c"/>
+  <text x="640" y="124" text-anchor="middle" fill="white" font-size="11" font-weight="600">sysfs Thermal Zones</text>
+  <text x="640" y="150" text-anchor="middle" fill="#c2410c" font-size="10">gpu-thermal (zone 1)</text>
+  <text x="640" y="165" text-anchor="middle" fill="#c2410c" font-size="10">cpu-thermal (zone 0)</text>
+  <text x="640" y="178" text-anchor="middle" fill="#c2410c" font-size="10">tj-thermal  (zone 8)</text>
+
+  <!-- status.py -->
+  <rect x="740" y="108" width="160" height="80" rx="8" fill="white" stroke="#0891b2" stroke-width="1.3" filter="url(#shadow)"/>
+  <rect x="740" y="108" width="160" height="24" rx="8" fill="#0891b2"/>
+  <rect x="740" y="120" width="160" height="12" fill="#0891b2"/>
+  <text x="820" y="124" text-anchor="middle" fill="white" font-size="11" font-weight="600">status.py (host)</text>
+  <text x="820" y="148" text-anchor="middle" fill="#0e7490" font-size="9">Container &amp; process check</text>
+  <text x="820" y="161" text-anchor="middle" fill="#0e7490" font-size="9">Temps, memory, disk</text>
+  <text x="820" y="174" text-anchor="middle" fill="#0e7490" font-size="9">Last detection, service</text>
+
+  <!-- ============== DOCKER CONTAINER ============== -->
+  <rect x="340" y="210" width="720" height="215" rx="10" fill="url(#dockerGrad)" stroke="#2563eb" stroke-width="1.8" filter="url(#shadow)"/>
+  <text x="700" y="234" text-anchor="middle" fill="#1e40af" font-size="13" font-weight="700">Docker Container: yolo-saad (l4t-pytorch:r36.2.0) — --runtime nvidia --network host</text>
+
+  <!-- inference.py main box -->
+  <rect x="360" y="250" width="300" height="160" rx="8" fill="white" stroke="#2563eb" stroke-width="1.3" filter="url(#shadow)"/>
+  <rect x="360" y="250" width="300" height="26" rx="8" fill="#2563eb"/>
+  <rect x="360" y="264" width="300" height="12" fill="#2563eb"/>
+  <text x="510" y="268" text-anchor="middle" fill="white" font-size="12" font-weight="700">inference.py</text>
+
+  <!-- Pipeline steps inside inference.py -->
+  <!-- Camera input -->
+  <rect x="375" y="286" width="90" height="40" rx="6" fill="#fef9c3" stroke="#ca8a04" stroke-width="1"/>
+  <text x="420" y="303" text-anchor="middle" fill="#854d0e" font-size="10" font-weight="600">Camera</text>
+  <text x="420" y="316" text-anchor="middle" fill="#a16207" font-size="8">auto-recovery</text>
+
+  <!-- YOLO model -->
+  <rect x="485" y="286" width="90" height="40" rx="6" fill="#dbeafe" stroke="#2563eb" stroke-width="1"/>
+  <text x="530" y="303" text-anchor="middle" fill="#1e40af" font-size="10" font-weight="600">YOLO Model</text>
+  <text x="530" y="316" text-anchor="middle" fill="#2563eb" font-size="8">TensorRT .engine</text>
+
+  <!-- Arrow camera to yolo -->
+  <line x1="465" y1="306" x2="482" y2="306" stroke="#475569" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <!-- Class filter -->
+  <rect x="375" y="338" width="270" height="32" rx="6" fill="#f0fdf4" stroke="#16a34a" stroke-width="1"/>
+  <text x="510" y="354" text-anchor="middle" fill="#166534" font-size="9" font-weight="600">Class Filter: person, dog, cat, car, bicycle, motorcycle, truck, bus</text>
+
+  <!-- Guards -->
+  <rect x="375" y="378" width="130" height="24" rx="5" fill="#fef2f2" stroke="#dc2626" stroke-width="1"/>
+  <text x="440" y="394" text-anchor="middle" fill="#991b1b" font-size="9">Disk guard &lt;200MB</text>
+
+  <rect x="515" y="378" width="130" height="24" rx="5" fill="#fff7ed" stroke="#ea580c" stroke-width="1"/>
+  <text x="580" y="394" text-anchor="middle" fill="#9a3412" font-size="9">GPU temp monitor</text>
+
+  <!-- Output boxes inside Docker -->
+  <!-- Video output -->
+  <rect x="690" y="253" width="155" height="72" rx="8" fill="white" stroke="#7c3aed" stroke-width="1.2"/>
+  <rect x="690" y="253" width="155" height="22" rx="8" fill="#7c3aed"/>
+  <rect x="690" y="264" width="155" height="11" fill="#7c3aed"/>
+  <text x="767" y="269" text-anchor="middle" fill="white" font-size="10" font-weight="600">Video Output</text>
+  <text x="767" y="292" text-anchor="middle" fill="#6d28d9" font-size="9">detect_*.avi</text>
+  <text x="767" y="305" text-anchor="middle" fill="#7c3aed" font-size="9">FPS + temp overlay</text>
+  <text x="767" y="318" text-anchor="middle" fill="#7c3aed" font-size="9">Rotated (keep 10)</text>
+
+  <!-- CSV output -->
+  <rect x="690" y="335" width="155" height="72" rx="8" fill="white" stroke="#0891b2" stroke-width="1.2"/>
+  <rect x="690" y="335" width="155" height="22" rx="8" fill="#0891b2"/>
+  <rect x="690" y="346" width="155" height="11" fill="#0891b2"/>
+  <text x="767" y="351" text-anchor="middle" fill="white" font-size="10" font-weight="600">CSV Log</text>
+  <text x="767" y="374" text-anchor="middle" fill="#0e7490" font-size="9">detections_*.csv</text>
+  <text x="767" y="387" text-anchor="middle" fill="#0e7490" font-size="9">timestamp, class, conf</text>
+  <text x="767" y="400" text-anchor="middle" fill="#0e7490" font-size="9">bounding box coords</text>
+
+  <!-- Arrow: inference to video -->
+  <line x1="660" y1="296" x2="687" y2="290" stroke="#7c3aed" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <!-- Arrow: inference to CSV -->
+  <line x1="660" y1="350" x2="687" y2="365" stroke="#0891b2" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <!-- Volume mount note -->
+  <rect x="860" y="260" width="175" height="52" rx="6" fill="#fefce8" stroke="#ca8a04" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="947" y="280" text-anchor="middle" fill="#92400e" font-size="9" font-weight="600">Volume Mount</text>
+  <text x="947" y="295" text-anchor="middle" fill="#a16207" font-size="9">/workspace ↔ ~/Desktop</text>
+  <text x="947" y="307" text-anchor="middle" fill="#a16207" font-size="9">outputs visible on host</text>
+
+  <!-- ============== ARROWS BETWEEN SECTIONS ============== -->
+
+  <!-- Robot dog to Jetson host -->
+  <line x1="285" y1="136" x2="300" y2="136" stroke="#16a34a" stroke-width="2" marker-end="url(#arrow-green)"/>
+
+  <!-- systemd to Docker -->
+  <path d="M440,188 L440,207" fill="none" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="462" y="200" fill="#6d28d9" font-size="8">docker start + exec</text>
+
+  <!-- sysfs to inference (temp reading) -->
+  <path d="M600,188 L580,248" fill="none" stroke="#ea580c" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#arrow-orange)"/>
+
+  <!-- status.py arrows -->
+  <path d="M820,188 L820,207" fill="none" stroke="#0891b2" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#arrow-blue)"/>
+  <text x="835" y="200" fill="#0e7490" font-size="8">inspect</text>
+
+  <!-- ============== RECOVERY FLOW (bottom) ============== -->
+  <rect x="20" y="460" width="1060" height="145" rx="10" fill="white" stroke="#475569" stroke-width="1.2" filter="url(#shadow)"/>
+  <text x="550" y="486" text-anchor="middle" fill="#1e293b" font-size="14" font-weight="700">Recovery &amp; Safety Mechanisms</text>
+
+  <!-- Camera recovery -->
+  <rect x="40" y="502" width="240" height="88" rx="8" fill="#fef9c3" stroke="#ca8a04" stroke-width="1.2"/>
+  <text x="160" y="522" text-anchor="middle" fill="#854d0e" font-size="11" font-weight="700">Camera Auto-Recovery</text>
+  <text x="160" y="540" text-anchor="middle" fill="#92400e" font-size="10">Disconnect detected</text>
+  <text x="160" y="556" text-anchor="middle" fill="#92400e" font-size="10">↓ exponential backoff</text>
+  <text x="160" y="572" text-anchor="middle" fill="#92400e" font-size="10">1s → 2s → 4s → ... → 30s max</text>
+  <text x="160" y="584" text-anchor="middle" fill="#166534" font-size="9" font-weight="600">Retries indefinitely until reconnect</text>
+
+  <!-- Process recovery -->
+  <rect x="300" y="502" width="240" height="88" rx="8" fill="#f3e8ff" stroke="#7c3aed" stroke-width="1.2"/>
+  <text x="420" y="522" text-anchor="middle" fill="#6b21a8" font-size="11" font-weight="700">Process Crash Recovery</text>
+  <text x="420" y="540" text-anchor="middle" fill="#7e22ce" font-size="10">inference.py exits non-zero</text>
+  <text x="420" y="556" text-anchor="middle" fill="#7e22ce" font-size="10">↓ systemd detects</text>
+  <text x="420" y="572" text-anchor="middle" fill="#7e22ce" font-size="10">Restart=on-failure</text>
+  <text x="420" y="584" text-anchor="middle" fill="#166534" font-size="9" font-weight="600">10 second cooldown, then restart</text>
+
+  <!-- Disk guard -->
+  <rect x="560" y="502" width="240" height="88" rx="8" fill="#fef2f2" stroke="#dc2626" stroke-width="1.2"/>
+  <text x="680" y="522" text-anchor="middle" fill="#991b1b" font-size="11" font-weight="700">Disk Space Guard</text>
+  <text x="680" y="540" text-anchor="middle" fill="#b91c1c" font-size="10">Checks every 300 frames (~10s)</text>
+  <text x="680" y="556" text-anchor="middle" fill="#b91c1c" font-size="10">If free &lt; 200MB:</text>
+  <text x="680" y="572" text-anchor="middle" fill="#b91c1c" font-size="10">↓ stop video recording</text>
+  <text x="680" y="584" text-anchor="middle" fill="#166534" font-size="9" font-weight="600">CSV logging continues (tiny footprint)</text>
+
+  <!-- File rotation -->
+  <rect x="820" y="502" width="240" height="88" rx="8" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.2"/>
+  <text x="940" y="522" text-anchor="middle" fill="#166534" font-size="11" font-weight="700">File Rotation</text>
+  <text x="940" y="540" text-anchor="middle" fill="#15803d" font-size="10">On startup: scan output/</text>
+  <text x="940" y="556" text-anchor="middle" fill="#15803d" font-size="10">If &gt;10 video sessions:</text>
+  <text x="940" y="572" text-anchor="middle" fill="#15803d" font-size="10">↓ delete oldest pairs</text>
+  <text x="940" y="584" text-anchor="middle" fill="#166534" font-size="9" font-weight="600">Keeps last 10 video + CSV pairs</text>
+
+  <!-- ============== DATA FLOW (bottom) ============== -->
+  <rect x="20" y="620" width="1060" height="185" rx="10" fill="white" stroke="#475569" stroke-width="1.2" filter="url(#shadow)"/>
+  <text x="550" y="646" text-anchor="middle" fill="#1e293b" font-size="14" font-weight="700">Data Flow Pipeline</text>
+
+  <!-- Flow nodes -->
+  <rect x="45" y="665" width="110" height="45" rx="22" fill="#fef9c3" stroke="#ca8a04" stroke-width="1.5"/>
+  <text x="100" y="691" text-anchor="middle" fill="#854d0e" font-size="11" font-weight="600">Camera Frame</text>
+
+  <rect x="205" y="665" width="130" height="45" rx="22" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="270" y="685" text-anchor="middle" fill="#1e40af" font-size="10" font-weight="600">TensorRT YOLO</text>
+  <text x="270" y="700" text-anchor="middle" fill="#2563eb" font-size="9">yolo26n.engine</text>
+
+  <rect x="385" y="665" width="130" height="45" rx="22" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="450" y="685" text-anchor="middle" fill="#166534" font-size="10" font-weight="600">Class Filter</text>
+  <text x="450" y="700" text-anchor="middle" fill="#15803d" font-size="9">8 outdoor classes</text>
+
+  <!-- Arrows in flow -->
+  <line x1="155" y1="688" x2="202" y2="688" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="335" y1="688" x2="382" y2="688" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Fan out -->
+  <line x1="515" y1="678" x2="575" y2="668" stroke="#7c3aed" stroke-width="1.3" marker-end="url(#arrow)"/>
+  <line x1="515" y1="688" x2="575" y2="688" stroke="#0891b2" stroke-width="1.3" marker-end="url(#arrow)"/>
+  <line x1="515" y1="698" x2="575" y2="710" stroke="#ea580c" stroke-width="1.3" marker-end="url(#arrow)"/>
+
+  <!-- Output targets -->
+  <rect x="580" y="650" width="145" height="32" rx="6" fill="#f3e8ff" stroke="#7c3aed" stroke-width="1.2"/>
+  <text x="652" y="670" text-anchor="middle" fill="#6b21a8" font-size="10" font-weight="600">Annotated Video</text>
+
+  <rect x="580" y="688" width="145" height="32" rx="6" fill="#ecfeff" stroke="#0891b2" stroke-width="1.2"/>
+  <text x="652" y="708" text-anchor="middle" fill="#0e7490" font-size="10" font-weight="600">CSV Detection Log</text>
+
+  <rect x="580" y="726" width="145" height="32" rx="6" fill="#fff7ed" stroke="#ea580c" stroke-width="1.2"/>
+  <text x="652" y="746" text-anchor="middle" fill="#9a3412" font-size="10" font-weight="600">Terminal + Overlay</text>
+
+  <!-- Disk -->
+  <line x1="725" y1="666" x2="785" y2="666" stroke="#7c3aed" stroke-width="1.3" marker-end="url(#arrow)"/>
+  <line x1="725" y1="704" x2="785" y2="690" stroke="#0891b2" stroke-width="1.3" marker-end="url(#arrow)"/>
+
+  <rect x="790" y="655" width="120" height="50" rx="8" fill="#f8fafc" stroke="#475569" stroke-width="1.5"/>
+  <text x="850" y="676" text-anchor="middle" fill="#1e293b" font-size="11" font-weight="700">~/Desktop/</text>
+  <text x="850" y="693" text-anchor="middle" fill="#475569" font-size="10">output/</text>
+
+  <!-- status.py reads disk -->
+  <rect x="930" y="655" width="130" height="50" rx="8" fill="#ecfeff" stroke="#0891b2" stroke-width="1.3"/>
+  <text x="995" y="675" text-anchor="middle" fill="#0e7490" font-size="10" font-weight="600">status.py</text>
+  <text x="995" y="693" text-anchor="middle" fill="#0891b2" font-size="9">reads all outputs</text>
+
+  <line x1="910" y1="680" x2="927" y2="680" stroke="#0891b2" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#arrow-blue)"/>
+
+  <!-- Legend -->
+  <rect x="45" y="735" width="490" height="55" rx="6" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="60" y="755" fill="#334155" font-size="10" font-weight="600">LEGEND:</text>
+  <line x1="120" y1="751" x2="150" y2="751" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="158" y="755" fill="#475569" font-size="9">data flow</text>
+  <line x1="220" y1="751" x2="250" y2="751" stroke="#475569" stroke-width="1.2" stroke-dasharray="4,3"/>
+  <text x="258" y="755" fill="#475569" font-size="9">monitoring / read</text>
+  <rect x="345" y="742" width="14" height="14" rx="3" fill="#dbeafe" stroke="#2563eb" stroke-width="1"/>
+  <text x="365" y="754" fill="#475569" font-size="9">inference</text>
+  <rect x="420" y="742" width="14" height="14" rx="3" fill="#fef9c3" stroke="#ca8a04" stroke-width="1"/>
+  <text x="440" y="754" fill="#475569" font-size="9">camera/hardware</text>
+
+  <rect x="120" y="764" width="14" height="14" rx="3" fill="#f3e8ff" stroke="#7c3aed" stroke-width="1"/>
+  <text x="140" y="776" fill="#475569" font-size="9">systemd/video</text>
+  <rect x="220" y="764" width="14" height="14" rx="3" fill="#fef2f2" stroke="#dc2626" stroke-width="1"/>
+  <text x="240" y="776" fill="#475569" font-size="9">safety guard</text>
+  <rect x="315" y="764" width="14" height="14" rx="3" fill="#ecfeff" stroke="#0891b2" stroke-width="1"/>
+  <text x="335" y="776" fill="#475569" font-size="9">monitoring/CSV</text>
+  <rect x="420" y="764" width="14" height="14" rx="3" fill="#f0fdf4" stroke="#16a34a" stroke-width="1"/>
+  <text x="440" y="776" fill="#475569" font-size="9">filter/rotation</text>
+</svg>

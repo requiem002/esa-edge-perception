@@ -1,0 +1,40 @@
+# Models — never commit
+*.pt
+*.onnx
+*.engine
+best*.*
+yolo26n.*
+yolo26n_pretrained.*
+
+# Media
+*.avi
+*.mp4
+*.jpg
+*.jpeg
+*.png
+
+# Data / results
+*.csv
+*.json
+*.xlsx
+output/
+runs/
+network_results/
+__pycache__/
+*.pyc
+*.cpython-*.pyc
+
+# Local logs
+claude_code_log
+claude_code_net_sim_log
+
+# Desktop launchers
+*.desktop
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Allow architecture diagram (svg)
+!architecture.svg
