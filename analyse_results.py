@@ -2,19 +2,23 @@
 """
 Analyse network degradation experiment results and generate thesis plots.
 
-Reads summary.csv from network_test.py and produces:
-  1. FPS received vs network profile
-  2. End-to-end latency vs network profile
-  3. Detection delivery rate vs network profile
-  4. Combined perception quality score
+Produces 6 publication-quality plots at 300 DPI:
+  1. fps_vs_profile.png       — grouped bars: video FPS vs metadata FPS
+  2. latency_vs_profile.png   — mean and P95 with error bars
+  3. delivery_vs_profile.png  — video / meta / lidar delivery
+  4. throughput_vs_profile.png — video and LIDAR throughput (bytes/sec)
+  5. quality_score.png        — combined perception quality
+  6. server_vs_client.png     — frames sent vs received per profile
+                                 (when server_log.csv is available)
 
 Usage:
     python3 ~/Desktop/analyse_results.py
-    python3 ~/Desktop/analyse_results.py --input network_results/summary.csv
+    python3 ~/Desktop/analyse_results.py --input network_results/full_experiment_v2/summary.csv
 """
 
 import argparse
 import csv
+import json
 import sys
 from pathlib import Path
 
@@ -23,11 +27,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-# Publication defaults
 DPI = 300
-FONT_FAMILY = "serif"
 plt.rcParams.update({
-    "font.family": FONT_FAMILY,
+    "font.family": "serif",
     "font.size": 10,
     "axes.titlesize": 12,
     "axes.labelsize": 11,
@@ -39,7 +41,6 @@ plt.rcParams.update({
 
 
 def load_summary(csv_path):
-    """Load summary CSV into a list of dicts with numeric conversion."""
     rows = []
     with open(csv_path) as f:
         reader = csv.DictReader(f)
@@ -54,23 +55,14 @@ def load_summary(csv_path):
 
 
 def has_stddev(rows):
-    """Check if the summary contains stddev columns (from repeated trials)."""
     return "meta_fps_std" in rows[0] if rows else False
 
 
 def compute_quality_score(row):
-    """Compute a normalised perception quality score [0-100].
-
-    Weighted combination of:
-      - FPS component (40%): normalised to 25 FPS baseline
-      - Latency component (30%): penalty for latency above 100ms
-      - Delivery rate component (30%): direct percentage
-    """
-    # FPS: 0-25 FPS maps to 0-100, capped at 100
-    fps = row.get("meta_fps", 0)
+    """Quality score [0-100] weighted: 40% video FPS, 30% latency, 30% delivery."""
+    fps = row.get("video_fps", row.get("meta_fps", 0))
     fps_score = min(fps / 25.0 * 100, 100)
 
-    # Latency: 0ms = 100, 100ms = 80, 500ms = 40, 1000ms = 10, >1500ms = 0
     lat = row.get("latency_mean_ms", 0)
     if lat <= 0:
         lat_score = 100
@@ -83,34 +75,44 @@ def compute_quality_score(row):
     else:
         lat_score = max(10 - (lat - 1000) / 500 * 10, 0)
 
-    # Delivery rate: direct percentage
     dr = row.get("delivery_rate", 0)
     dr_score = dr * 100
 
-    # Weighted combination
-    score = 0.4 * fps_score + 0.3 * lat_score + 0.3 * dr_score
-    return round(score, 1)
+    return round(0.4 * fps_score + 0.3 * lat_score + 0.3 * dr_score, 1)
 
 
 def plot_fps_vs_profile(rows, out_dir, with_err):
-    """Bar chart: received FPS for each network profile."""
+    """Grouped bars: video FPS vs metadata FPS per profile."""
     labels = [r["label"] for r in rows]
-    fps_vals = [r.get("meta_fps", 0) for r in rows]
-    fps_err = [r.get("meta_fps_std", 0) for r in rows] if with_err else None
+    video_fps = [r.get("video_fps", 0) for r in rows]
+    meta_fps = [r.get("meta_fps", 0) for r in rows]
+    video_err = [r.get("video_fps_std", 0) for r in rows] if with_err else None
+    meta_err = [r.get("meta_fps_std", 0) for r in rows] if with_err else None
 
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, ax = plt.subplots(figsize=(11, 5))
     x = np.arange(len(labels))
-    bars = ax.bar(x, fps_vals, color="#2196F3", edgecolor="black",
-                  linewidth=0.5, yerr=fps_err, capsize=4,
-                  error_kw={"elinewidth": 1.2, "capthick": 1.2})
+    width = 0.38
 
-    for bar, val in zip(bars, fps_vals):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.3,
-                f"{val:.1f}", ha="center", va="bottom", fontsize=9)
+    b1 = ax.bar(x - width / 2, video_fps, width, label="Video (MJPEG)",
+                color="#2196F3", edgecolor="black", linewidth=0.5,
+                yerr=video_err, capsize=3,
+                error_kw={"elinewidth": 1.0, "capthick": 1.0})
+    b2 = ax.bar(x + width / 2, meta_fps, width, label="Metadata (JSON)",
+                color="#4CAF50", edgecolor="black", linewidth=0.5,
+                yerr=meta_err, capsize=3,
+                error_kw={"elinewidth": 1.0, "capthick": 1.0})
+
+    for bar, val in zip(b1, video_fps):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.4,
+                f"{val:.1f}", ha="center", va="bottom", fontsize=8)
+    for bar, val in zip(b2, meta_fps):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.4,
+                f"{val:.1f}", ha="center", va="bottom", fontsize=8)
 
     ax.set_xlabel("Network Profile")
-    ax.set_ylabel("Frames Per Second (FPS)")
-    ax.set_title("Received FPS vs Network Condition", fontweight="bold")
+    ax.set_ylabel("Frames per Second")
+    ax.set_title("Video vs Metadata Throughput by Network Condition",
+                 fontweight="bold")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=30, ha="right")
     ax.axhline(y=15, color="red", linestyle="--", alpha=0.7,
@@ -124,7 +126,6 @@ def plot_fps_vs_profile(rows, out_dir, with_err):
 
 
 def plot_latency_vs_profile(rows, out_dir, with_err):
-    """Bar chart: end-to-end latency for each network profile."""
     labels = [r["label"] for r in rows]
     lat_mean = [r.get("latency_mean_ms", 0) for r in rows]
     lat_p95 = [r.get("latency_p95_ms", r.get("latency_max_ms", 0)) for r in rows]
@@ -135,20 +136,20 @@ def plot_latency_vs_profile(rows, out_dir, with_err):
     x = np.arange(len(labels))
     width = 0.35
 
-    bars1 = ax.bar(x - width / 2, lat_mean, width, label="Mean Latency",
-                   color="#4CAF50", edgecolor="black", linewidth=0.5,
-                   yerr=lat_mean_err, capsize=3,
-                   error_kw={"elinewidth": 1.0, "capthick": 1.0})
-    bars2 = ax.bar(x + width / 2, lat_p95, width, label="P95 Latency",
-                   color="#FF9800", edgecolor="black", linewidth=0.5,
-                   yerr=lat_p95_err, capsize=3,
-                   error_kw={"elinewidth": 1.0, "capthick": 1.0})
+    b1 = ax.bar(x - width / 2, lat_mean, width, label="Mean Latency",
+                color="#4CAF50", edgecolor="black", linewidth=0.5,
+                yerr=lat_mean_err, capsize=3,
+                error_kw={"elinewidth": 1.0, "capthick": 1.0})
+    b2 = ax.bar(x + width / 2, lat_p95, width, label="P95 Latency",
+                color="#FF9800", edgecolor="black", linewidth=0.5,
+                yerr=lat_p95_err, capsize=3,
+                error_kw={"elinewidth": 1.0, "capthick": 1.0})
 
-    for bar, val in zip(bars1, lat_mean):
+    for bar, val in zip(b1, lat_mean):
         if val > 0:
             ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 5,
                     f"{val:.0f}", ha="center", va="bottom", fontsize=8)
-    for bar, val in zip(bars2, lat_p95):
+    for bar, val in zip(b2, lat_p95):
         if val > 0:
             ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 5,
                     f"{val:.0f}", ha="center", va="bottom", fontsize=8)
@@ -171,43 +172,53 @@ def plot_latency_vs_profile(rows, out_dir, with_err):
 
 
 def plot_delivery_vs_profile(rows, out_dir, with_err):
-    """Line chart: detection delivery rate vs network profile."""
+    """Three streams: video, metadata, lidar — receive rate normalised."""
     labels = [r["label"] for r in rows]
-    delivery = [r.get("delivery_rate", 0) * 100 for r in rows]
-    delivery_err = [r.get("delivery_rate_std", 0) * 100 for r in rows] if with_err else None
-    loss_pct = [r.get("loss_pct", 0) for r in rows]
 
-    fig, ax1 = plt.subplots(figsize=(10, 5))
+    # Compute per-stream relative rate (vs baseline = profile 0 of the same stream)
+    def _rel(key):
+        baseline = rows[0].get(key, 0)
+        if baseline <= 0:
+            return [0] * len(rows)
+        return [r.get(key, 0) / baseline * 100 for r in rows]
+
+    video_rel = _rel("video_fps")
+    meta_rel = _rel("meta_fps")
+    lidar_rel = _rel("lidar_fps")
+    has_lidar = any(r.get("lidar_fps", 0) > 0 for r in rows)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
     x = np.arange(len(labels))
 
-    color1 = "#9C27B0"
-    if with_err and delivery_err:
-        ax1.errorbar(x, delivery, yerr=delivery_err, fmt="o-", color=color1,
-                     linewidth=2, markersize=8, capsize=4,
-                     label="Delivery Rate")
-    else:
-        ax1.plot(x, delivery, "o-", color=color1, linewidth=2, markersize=8,
-                 label="Delivery Rate")
-    ax1.set_xlabel("Network Profile")
-    ax1.set_ylabel("Frame Delivery Rate (%)", color=color1)
-    ax1.tick_params(axis="y", labelcolor=color1)
-    ax1.set_ylim(0, 110)
+    ax.plot(x, video_rel, "o-", color="#2196F3", linewidth=2, markersize=8,
+            label="Video (MJPEG)")
+    ax.plot(x, meta_rel, "s-", color="#4CAF50", linewidth=2, markersize=8,
+            label="Metadata (JSON)")
+    if has_lidar:
+        ax.plot(x, lidar_rel, "^-", color="#9C27B0", linewidth=2, markersize=8,
+                label="LIDAR scans")
 
-    ax2 = ax1.twinx()
-    color2 = "#F44336"
-    ax2.bar(x, loss_pct, alpha=0.3, color=color2, label="Configured Loss (%)")
-    ax2.set_ylabel("Packet Loss (%)", color=color2)
-    ax2.tick_params(axis="y", labelcolor=color2)
-    ax2.set_ylim(0, max(loss_pct) * 2 + 1 if loss_pct else 10)
+    # Configured loss as faint background bars
+    loss_pct = [r.get("loss_pct", 0) for r in rows]
+    ax2 = ax.twinx()
+    ax2.bar(x, loss_pct, alpha=0.15, color="#F44336",
+            label="Configured Loss (%)")
+    ax2.set_ylabel("Configured Packet Loss (%)", color="#F44336")
+    ax2.tick_params(axis="y", labelcolor="#F44336")
+    ax2.set_ylim(0, max(loss_pct) * 2 + 1 if any(loss_pct) else 10)
 
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(labels, rotation=30, ha="right")
-    ax1.set_title("Detection Delivery Rate vs Network Condition",
-                  fontweight="bold")
+    ax.set_xlabel("Network Profile")
+    ax.set_ylabel("Throughput Relative to Baseline (%)")
+    ax.set_title("Per-Stream Degradation vs Network Condition",
+                 fontweight="bold")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=30, ha="right")
+    ax.set_ylim(0, 115)
+    ax.axhline(y=100, color="black", linestyle=":", alpha=0.3)
 
-    lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, loc="lower left")
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, loc="lower left")
 
     fig.tight_layout()
     fig.savefig(out_dir / "delivery_vs_profile.png", dpi=DPI, bbox_inches="tight")
@@ -215,20 +226,54 @@ def plot_delivery_vs_profile(rows, out_dir, with_err):
     print(f"  Saved: delivery_vs_profile.png")
 
 
+def plot_throughput_vs_profile(rows, out_dir):
+    """Effective throughput (KiB/s) for video and LIDAR."""
+    labels = [r["label"] for r in rows]
+    video_kib = [r.get("video_bytes_per_sec", 0) / 1024 for r in rows]
+    lidar_kib = [r.get("lidar_bytes_per_sec", 0) / 1024 for r in rows]
+    has_lidar = any(v > 0 for v in lidar_kib)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    x = np.arange(len(labels))
+
+    ax.plot(x, video_kib, "o-", color="#2196F3", linewidth=2, markersize=8,
+            label="Video (MJPEG)")
+    if has_lidar:
+        ax.plot(x, lidar_kib, "^-", color="#9C27B0", linewidth=2, markersize=8,
+                label="LIDAR scans")
+
+    for xi, val in zip(x, video_kib):
+        ax.text(xi, val + max(video_kib) * 0.02, f"{val:.0f}",
+                ha="center", va="bottom", fontsize=8, color="#1565C0")
+    if has_lidar:
+        for xi, val in zip(x, lidar_kib):
+            ax.text(xi, val + max(video_kib) * 0.02, f"{val:.0f}",
+                    ha="center", va="bottom", fontsize=8, color="#6A1B9A")
+
+    ax.set_xlabel("Network Profile")
+    ax.set_ylabel("Effective Throughput (KiB/s)")
+    ax.set_title("Effective Stream Throughput vs Network Condition",
+                 fontweight="bold")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=30, ha="right")
+    ax.set_yscale("log")
+    ax.set_ylim(bottom=1)
+    ax.legend()
+    ax.grid(True, which="both", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_dir / "throughput_vs_profile.png", dpi=DPI,
+                bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: throughput_vs_profile.png")
+
+
 def plot_quality_score(rows, out_dir, with_err):
-    """Combined perception quality score plot."""
     labels = [r["label"] for r in rows]
     scores = [r.get("quality_score", 0) for r in rows]
     score_err = [r.get("quality_score_std", 0) for r in rows] if with_err else None
 
-    colors = []
-    for s in scores:
-        if s >= 70:
-            colors.append("#4CAF50")
-        elif s >= 40:
-            colors.append("#FF9800")
-        else:
-            colors.append("#F44336")
+    colors = ["#4CAF50" if s >= 70 else "#FF9800" if s >= 40 else "#F44336"
+              for s in scores]
 
     fig, ax = plt.subplots(figsize=(10, 5))
     x = np.arange(len(labels))
@@ -238,85 +283,173 @@ def plot_quality_score(rows, out_dir, with_err):
 
     for bar, val in zip(bars, scores):
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 1,
-                f"{val:.0f}", ha="center", va="bottom", fontsize=10,
-                fontweight="bold")
+                f"{val:.0f}", ha="center", va="bottom",
+                fontsize=10, fontweight="bold")
 
     ax.set_xlabel("Network Profile")
-    ax.set_ylabel("Perception Quality Score (0\u2013100)")
+    ax.set_ylabel("Perception Quality Score (0–100)")
     ax.set_title("Combined Perception Quality vs Network Condition",
                  fontweight="bold")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=30, ha="right")
     ax.set_ylim(0, 110)
-
     ax.axhline(y=70, color="green", linestyle="--", alpha=0.5,
                label="Good (> 70)")
     ax.axhline(y=40, color="orange", linestyle="--", alpha=0.5,
                label="Degraded (> 40)")
     ax.legend()
-
     fig.tight_layout()
     fig.savefig(out_dir / "quality_score.png", dpi=DPI, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: quality_score.png")
 
 
+def server_vs_client(rows, exp_dir, server_log_path, out_dir):
+    """Compare server-sent vs client-received frames for each profile.
+
+    Reads run_start_ts/run_end_ts from each profile.json (per-repeat windows),
+    counts server_log entries within those windows, and compares to received
+    metadata count.
+    """
+    if not server_log_path.exists():
+        print(f"  [SKIP] Server log not found: {server_log_path}")
+        return
+
+    server_events = []
+    with open(server_log_path) as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            try:
+                server_events.append(float(r["timestamp"]))
+            except (ValueError, KeyError):
+                pass
+    if not server_events:
+        print(f"  [SKIP] Server log empty: {server_log_path}")
+        return
+    server_events.sort()
+    print(f"  Server log: {len(server_events)} frames spanning "
+          f"{server_events[-1] - server_events[0]:.1f}s")
+
+    sent = []
+    received = []
+    labels = []
+
+    for r in rows:
+        profile_key = r.get("profile", "")
+        labels.append(r["label"])
+        prof_dir = exp_dir / str(profile_key)
+        prof_json = prof_dir / "profile.json"
+        if not prof_json.exists():
+            sent.append(0)
+            received.append(0)
+            continue
+
+        with open(prof_json) as f:
+            prof_data = json.load(f)
+
+        repeats = prof_data.get("repeats", [])
+        total_sent = 0
+        total_received = 0
+        for rep in repeats:
+            t0 = rep.get("run_start_ts")
+            t1 = rep.get("run_end_ts")
+            if not t0 or not t1:
+                continue
+            n_sent = sum(1 for ts in server_events if t0 <= ts <= t1)
+            n_recv = rep.get("meta_messages", 0)
+            total_sent += n_sent
+            total_received += n_recv
+        sent.append(total_sent)
+        received.append(total_received)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    x = np.arange(len(labels))
+    width = 0.38
+
+    ax.bar(x - width / 2, sent, width, label="Server-sent",
+           color="#1976D2", edgecolor="black", linewidth=0.5)
+    ax.bar(x + width / 2, received, width, label="Client-received",
+           color="#43A047", edgecolor="black", linewidth=0.5)
+
+    for xi, s_val, r_val in zip(x, sent, received):
+        if s_val > 0:
+            loss = (s_val - r_val) / s_val * 100 if s_val else 0
+            ax.text(xi, max(s_val, r_val) * 1.02, f"−{loss:.1f}%",
+                    ha="center", va="bottom", fontsize=8,
+                    color="red" if loss > 5 else "black")
+
+    ax.set_xlabel("Network Profile")
+    ax.set_ylabel("Frame Count (across all repeats)")
+    ax.set_title("Server-Sent vs Client-Received Detection Frames",
+                 fontweight="bold")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=30, ha="right")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_dir / "server_vs_client.png", dpi=DPI,
+                bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: server_vs_client.png")
+
+    print("\n  Server-sent vs client-received frames per profile:")
+    print(f"  {'Profile':<32s} {'Sent':>8s} {'Received':>10s} {'Lost':>10s}")
+    print(f"  {'─' * 32} {'─' * 8} {'─' * 10} {'─' * 10}")
+    for lab, s_val, r_val in zip(labels, sent, received):
+        loss_pct = (s_val - r_val) / s_val * 100 if s_val else 0
+        print(f"  {lab:<32s} {s_val:>8d} {r_val:>10d} "
+              f"{loss_pct:>9.2f}%")
+
+
 def print_thesis_table(rows, with_err):
-    """Print a formatted table suitable for pasting into a thesis."""
-    print(f"\n{'=' * 100}")
+    print(f"\n{'=' * 115}")
     print("  THESIS TABLE — Perception Quality Under Simulated Network Conditions")
-    print(f"{'=' * 100}")
+    print(f"{'=' * 115}")
 
     if with_err:
         hdr = (f"  {'Network Condition':<32s} {'Delay':>7s} {'BW':>7s} "
-               f"{'Loss':>6s} {'FPS':>12s} {'Latency (ms)':>16s} "
-               f"{'Delivery':>12s} {'Score':>8s}")
-        sep = (f"  {'─' * 32} {'─' * 7} {'─' * 7} {'─' * 6} "
-               f"{'─' * 12} {'─' * 16} {'─' * 12} {'─' * 8}")
+               f"{'Loss':>5s} {'Video FPS':>14s} {'Meta FPS':>12s} "
+               f"{'Latency (ms)':>16s} {'Score':>6s}")
         print(hdr)
-        print(sep)
+        print(f"  {'─' * 32} {'─' * 7} {'─' * 7} {'─' * 5} "
+              f"{'─' * 14} {'─' * 12} {'─' * 16} {'─' * 6}")
         for r in rows:
             bw = r.get("bandwidth_mbps", 0)
             bw_str = f"{bw:.1f}" if bw > 0 else "∞"
-            fps_str = f"{r.get('meta_fps', 0):.1f} ± {r.get('meta_fps_std', 0):.1f}"
-            lat_str = f"{r.get('latency_mean_ms', 0):.0f} ± {r.get('latency_mean_ms_std', 0):.0f}"
-            dr_val = r.get('delivery_rate', 0)
-            dr_std = r.get('delivery_rate_std', 0)
-            dr_str = f"{dr_val * 100:.1f} ± {dr_std * 100:.1f}%"
+            v_str = f"{r.get('video_fps', 0):.1f}±{r.get('video_fps_std', 0):.1f}"
+            m_str = f"{r.get('meta_fps', 0):.1f}±{r.get('meta_fps_std', 0):.1f}"
+            lat_str = f"{r.get('latency_mean_ms', 0):.0f}±{r.get('latency_mean_ms_std', 0):.0f}"
             score_str = f"{r.get('quality_score', 0):.0f}"
             print(f"  {str(r.get('label', '')):<32s} "
                   f"{r.get('delay_ms', 0):>5.0f}ms "
                   f"{bw_str:>6s}M "
-                  f"{r.get('loss_pct', 0):>5.1f}% "
-                  f"{fps_str:>12s} "
+                  f"{r.get('loss_pct', 0):>4.1f}% "
+                  f"{v_str:>14s} "
+                  f"{m_str:>12s} "
                   f"{lat_str:>16s} "
-                  f"{dr_str:>12s} "
-                  f"{score_str:>8s}")
+                  f"{score_str:>6s}")
     else:
         hdr = (f"  {'Network Condition':<32s} {'Delay':>7s} {'BW':>7s} "
-               f"{'Loss':>6s} {'FPS':>6s} {'Lat (ms)':>9s} "
-               f"{'P95 (ms)':>9s} {'Delivery':>9s} {'Score':>6s}")
-        sep = (f"  {'─' * 32} {'─' * 7} {'─' * 7} {'─' * 6} "
-               f"{'─' * 6} {'─' * 9} {'─' * 9} {'─' * 9} {'─' * 6}")
+               f"{'Loss':>5s} {'Video FPS':>10s} {'Meta FPS':>9s} "
+               f"{'Lat (ms)':>9s} {'P95 (ms)':>9s} {'Score':>6s}")
         print(hdr)
-        print(sep)
+        print(f"  {'─' * 32} {'─' * 7} {'─' * 7} {'─' * 5} "
+              f"{'─' * 10} {'─' * 9} {'─' * 9} {'─' * 9} {'─' * 6}")
         for r in rows:
             bw = r.get("bandwidth_mbps", 0)
             bw_str = f"{bw:.1f}" if bw > 0 else "∞"
             print(f"  {str(r.get('label', '')):<32s} "
                   f"{r.get('delay_ms', 0):>5.0f}ms "
                   f"{bw_str:>6s}M "
-                  f"{r.get('loss_pct', 0):>5.1f}% "
-                  f"{r.get('meta_fps', 0):>6.1f} "
+                  f"{r.get('loss_pct', 0):>4.1f}% "
+                  f"{r.get('video_fps', 0):>10.1f} "
+                  f"{r.get('meta_fps', 0):>9.1f} "
                   f"{r.get('latency_mean_ms', 0):>9.1f} "
                   f"{r.get('latency_p95_ms', 0):>9.1f} "
-                  f"{r.get('delivery_rate', 0) * 100:>8.1f}% "
-                  f"{r.get('quality_score', 0):>5.0f}")
+                  f"{r.get('quality_score', 0):>6.0f}")
+    print(f"{'=' * 115}")
 
-    print(f"{'=' * 100}")
-
-    # Also print a LaTeX-ready version
-    print(f"\n  LaTeX table (copy-paste into \\begin{{tabular}}):")
+    # LaTeX table
+    print(f"\n  LaTeX rows (paste into \\begin{{tabular}}):")
     print(f"  {'─' * 80}")
     if with_err:
         for r in rows:
@@ -326,9 +459,9 @@ def print_thesis_table(rows, with_err):
                   f"{r.get('delay_ms', 0):.0f} & "
                   f"{bw_str} & "
                   f"{r.get('loss_pct', 0):.1f} & "
+                  f"${r.get('video_fps', 0):.1f} \\pm {r.get('video_fps_std', 0):.1f}$ & "
                   f"${r.get('meta_fps', 0):.1f} \\pm {r.get('meta_fps_std', 0):.1f}$ & "
                   f"${r.get('latency_mean_ms', 0):.0f} \\pm {r.get('latency_mean_ms_std', 0):.0f}$ & "
-                  f"${r.get('delivery_rate', 0) * 100:.1f} \\pm {r.get('delivery_rate_std', 0) * 100:.1f}$ & "
                   f"{r.get('quality_score', 0):.0f} \\\\")
     else:
         for r in rows:
@@ -338,10 +471,10 @@ def print_thesis_table(rows, with_err):
                   f"{r.get('delay_ms', 0):.0f} & "
                   f"{bw_str} & "
                   f"{r.get('loss_pct', 0):.1f} & "
+                  f"{r.get('video_fps', 0):.1f} & "
                   f"{r.get('meta_fps', 0):.1f} & "
                   f"{r.get('latency_mean_ms', 0):.0f} & "
                   f"{r.get('latency_p95_ms', 0):.0f} & "
-                  f"{r.get('delivery_rate', 0) * 100:.1f} & "
                   f"{r.get('quality_score', 0):.0f} \\\\")
     print(f"  {'─' * 80}\n")
 
@@ -349,19 +482,27 @@ def print_thesis_table(rows, with_err):
 def main():
     parser = argparse.ArgumentParser(
         description="Analyse network degradation experiment results")
-    parser.add_argument("--input", default="network_results/summary.csv",
-                        help="Path to summary CSV")
-    parser.add_argument("--output-dir", default=None,
-                        help="Directory for plots (default: same as input)")
+    parser.add_argument("--input", default="network_results/summary.csv")
+    parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--server-log", default=None,
+                        help="Path to server_log.csv (for server-vs-client comparison)")
     args = parser.parse_args()
 
     csv_path = Path(args.input)
     if not csv_path.exists():
-        sys.exit(f"[ERROR] Summary CSV not found: {csv_path}\n"
-                 f"Run network_test.py first.")
+        sys.exit(f"[ERROR] Summary CSV not found: {csv_path}")
 
     out_dir = Path(args.output_dir) if args.output_dir else csv_path.parent
+    exp_dir = csv_path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Default server log location: experiment dir, then parent
+    if args.server_log:
+        server_log_path = Path(args.server_log)
+    elif (exp_dir / "server_log.csv").exists():
+        server_log_path = exp_dir / "server_log.csv"
+    else:
+        server_log_path = exp_dir.parent / "server_log.csv"
 
     print(f"Loading: {csv_path}")
     rows = load_summary(csv_path)
@@ -373,18 +514,17 @@ def main():
     else:
         print("Single-trial data — no error bars\n")
 
-    # Compute quality scores
     for r in rows:
         r["quality_score"] = compute_quality_score(r)
 
-    # Generate plots
     print("Generating plots:")
     plot_fps_vs_profile(rows, out_dir, with_err)
     plot_latency_vs_profile(rows, out_dir, with_err)
     plot_delivery_vs_profile(rows, out_dir, with_err)
+    plot_throughput_vs_profile(rows, out_dir)
     plot_quality_score(rows, out_dir, with_err)
+    server_vs_client(rows, exp_dir, server_log_path, out_dir)
 
-    # Update summary CSV with quality scores
     enriched_csv = out_dir / "summary_with_scores.csv"
     with open(enriched_csv, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=rows[0].keys())
@@ -393,7 +533,6 @@ def main():
             writer.writerow(r)
     print(f"\nEnriched CSV: {enriched_csv}")
 
-    # Print thesis table
     print_thesis_table(rows, with_err)
 
 

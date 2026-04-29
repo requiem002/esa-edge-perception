@@ -93,4 +93,66 @@ OpenClaw (`~/.openclaw/`) is an agentic framework running on the Jetson. It has 
 
 ## Requirements
 
-`requirements.md` on the Desktop contains formal, numbered requirements for the CV pipeline covering detection, thermal management, network resilience, camera fault tolerance, logging, latency, and robot integration.
+`requirements.md` on the Desktop contains formal, numbered requirements for the CV pipeline covering detection, thermal management, network resilience, camera fault tolerance, logging, latency, and robot integration. (Note: the canonical copy is `requirements.xlsx` — the `.md` mirror may not exist on disk.)
+
+## Git repository
+
+`~/Desktop` itself is the git repo (no file moves), tracking only source/docs.
+
+- **Remote**: https://github.com/requiem002/esa-edge-perception
+- **Branch**: `main`
+- **Tracked**: `*.py`, `*.sh`, `*.md`, `*.svg`, `*.service`, `requirements.*`, `CLAUDE.md`, `architecture.svg`
+- **Ignored** (`.gitignore`): models (`*.pt/onnx/engine`, `best*`, `yolo26n.*`), media (`*.avi/mp4/jpg/png`), data (`*.csv/json/xlsx`, `output/`, `runs/`, `network_results/`), local logs, desktop launchers, `__pycache__/`.
+
+Commit and push as the regular user — `~/Desktop/.git` is owned by the user, not root.
+
+## LIDAR (LD19 / LDLidar)
+
+- Connected to the **host** at `/dev/ttyTHS1` at 230 400 baud (NOT inside Docker).
+- Reference: `lidar_test.py` (raw packet decode example).
+- Streamer: `lidar_stream.py` — reads LD19 packets, assembles full 360° scans (~10 Hz, ~300–450 points/scan), broadcasts each scan as length-prefixed JSON over TCP port **8092**.
+- LD19 packet layout: `0x54 0x2C` header + 45 data bytes (12 distance/confidence triplets between `start_angle` and `end_angle`).
+
+## Network degradation experiment
+
+Three-stream perception pipeline measured over emulated 5G/NTN links (the Tegra kernel lacks `sch_netem`, so a userspace proxy applies delay/bandwidth/loss):
+
+| Component        | Where        | Port |
+|------------------|--------------|------|
+| `stream_server.py` (MJPEG + YOLO) | inside `yolo-saad` | 8090 (video), 8091 (meta) |
+| `lidar_stream.py`                 | host             | 8092 (lidar) |
+| `stream_client.py`                | host             | connects via proxies on 9090/9091/9092 |
+| `network_test.py`                 | host             | orchestrator (6 profiles, --repeats N) |
+| `analyse_results.py`              | host             | plots + thesis table |
+
+Runtime artefacts (all in `network_results/`, all gitignored):
+- `summary.csv` — per-profile means + stddevs
+- `<profile>/measurements_repN[._video|_lidar].csv` — per-repeat client traces
+- `<profile>/profile.json` — config + per-repeat run windows (`run_start_ts`/`run_end_ts`)
+- `server_log.csv` (`stream_server.py --log`) — every frame the server processed
+- `lidar_server_log.csv` (`lidar_stream.py --log`) — every scan the LIDAR streamer published
+- 6 plots: `fps_vs_profile.png`, `latency_vs_profile.png`, `delivery_vs_profile.png`, `throughput_vs_profile.png`, `quality_score.png`, `server_vs_client.png`
+
+Latest run lives in `network_results/full_experiment_v2/` — three streams (video / metadata / lidar), 6 profiles, 60 s × 3 repeats.
+
+To reproduce:
+
+```bash
+# 1. Start servers
+docker exec -d yolo-saad python3 /workspace/stream_server.py \
+    --log /workspace/network_results/full_experiment_v2/server_log.csv
+nohup python3 ~/Desktop/lidar_stream.py \
+    --log ~/Desktop/network_results/full_experiment_v2/lidar_server_log.csv \
+    > /tmp/lidar_stream.log 2>&1 &
+
+# 2. Run experiment
+python3 ~/Desktop/network_test.py \
+    --duration 60 --repeats 3 \
+    --output-dir network_results/full_experiment_v2
+
+# 3. Generate plots and thesis table
+python3 ~/Desktop/analyse_results.py \
+    --input network_results/full_experiment_v2/summary.csv
+```
+
+If the LIDAR isn't connected, `network_test.py` automatically detects that port 8092 is unreachable and runs camera-only.

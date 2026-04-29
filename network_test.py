@@ -310,7 +310,8 @@ class ConstrainedHTTPProxy:
 
 # ── Main experiment runner ───────────────────────────────────────────
 
-def run_client(host, port, meta_port, duration, output_csv):
+def run_client(host, port, meta_port, lidar_port, duration, output_csv,
+               no_lidar=False):
     """Run stream_client.py as a subprocess and return its exit code."""
     cmd = [
         sys.executable,
@@ -318,68 +319,108 @@ def run_client(host, port, meta_port, duration, output_csv):
         "--host", host,
         "--port", str(port),
         "--meta-port", str(meta_port),
+        "--lidar-port", str(lidar_port),
         "--duration", str(duration),
         "--output", str(output_csv),
     ]
+    if no_lidar:
+        cmd.append("--no-lidar")
     result = subprocess.run(cmd, timeout=duration + 30)
     return result.returncode
 
 
-def parse_client_csv(csv_path):
-    """Parse the client's measurement CSV and compute summary stats."""
-    rows = []
+def _read_csv(path):
     try:
-        with open(csv_path) as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                rows.append(row)
+        with open(path) as f:
+            return list(csv.DictReader(f))
     except FileNotFoundError:
-        return {}
+        return []
 
-    if not rows:
-        return {
-            "meta_messages": 0, "meta_fps": 0, "delivery_rate": 0,
-            "latency_mean_ms": 0, "latency_min_ms": 0, "latency_max_ms": 0,
-            "latency_p95_ms": 0, "inference_mean_ms": 0,
-            "total_detections": 0,
-        }
 
-    latencies = [float(r["latency_ms"]) for r in rows]
-    infer_times = [float(r["inference_time_ms"]) for r in rows]
-    det_counts = [int(r["num_detections"]) for r in rows]
+def parse_client_csv(csv_path):
+    """Parse the client's measurement CSVs (meta + video + lidar)
+    and compute summary stats."""
+    csv_path = Path(csv_path)
+    meta_rows = _read_csv(csv_path)
+    video_rows = _read_csv(csv_path.with_name(csv_path.stem + "_video.csv"))
+    lidar_rows = _read_csv(csv_path.with_name(csv_path.stem + "_lidar.csv"))
 
-    latencies_sorted = sorted(latencies)
-    p95_idx = int(len(latencies_sorted) * 0.95)
-
-    # Compute received FPS from timestamps
-    if len(rows) >= 2:
-        t_first = float(rows[0]["recv_timestamp"])
-        t_last = float(rows[-1]["recv_timestamp"])
-        duration = t_last - t_first
-        meta_fps = len(rows) / duration if duration > 0 else 0
-    else:
-        meta_fps = 0
-
-    # Delivery rate: messages received / server frame number range
-    frame_numbers = [int(r["frame_number"]) for r in rows]
-    if frame_numbers:
-        fn_min, fn_max = min(frame_numbers), max(frame_numbers)
-        expected = fn_max - fn_min + 1
-        delivery_rate = len(rows) / expected if expected > 0 else 0
-    else:
-        delivery_rate = 0
-
-    return {
-        "meta_messages": len(rows),
-        "meta_fps": round(meta_fps, 2),
-        "delivery_rate": round(delivery_rate, 4),
-        "latency_mean_ms": round(sum(latencies) / len(latencies), 2),
-        "latency_min_ms": round(min(latencies), 2),
-        "latency_max_ms": round(max(latencies), 2),
-        "latency_p95_ms": round(latencies_sorted[p95_idx], 2),
-        "inference_mean_ms": round(sum(infer_times) / len(infer_times), 2),
-        "total_detections": sum(det_counts),
+    summary = {
+        "meta_messages": 0, "meta_fps": 0, "delivery_rate": 0,
+        "latency_mean_ms": 0, "latency_min_ms": 0, "latency_max_ms": 0,
+        "latency_p95_ms": 0, "inference_mean_ms": 0,
+        "total_detections": 0,
+        "video_frames": 0, "video_fps": 0, "video_bytes_per_sec": 0,
+        "lidar_scans": 0, "lidar_fps": 0, "lidar_bytes_per_sec": 0,
     }
+
+    if meta_rows:
+        latencies = [float(r["latency_ms"]) for r in meta_rows]
+        infer_times = [float(r["inference_time_ms"]) for r in meta_rows]
+        det_counts = [int(r["num_detections"]) for r in meta_rows]
+
+        latencies_sorted = sorted(latencies)
+        p95_idx = min(int(len(latencies_sorted) * 0.95),
+                      len(latencies_sorted) - 1)
+
+        if len(meta_rows) >= 2:
+            t_first = float(meta_rows[0]["recv_timestamp"])
+            t_last = float(meta_rows[-1]["recv_timestamp"])
+            duration = t_last - t_first
+            meta_fps = len(meta_rows) / duration if duration > 0 else 0
+        else:
+            meta_fps = 0
+
+        frame_numbers = [int(r["frame_number"]) for r in meta_rows]
+        if frame_numbers:
+            fn_min, fn_max = min(frame_numbers), max(frame_numbers)
+            expected = fn_max - fn_min + 1
+            delivery_rate = len(meta_rows) / expected if expected > 0 else 0
+        else:
+            delivery_rate = 0
+
+        summary.update({
+            "meta_messages": len(meta_rows),
+            "meta_fps": round(meta_fps, 2),
+            "delivery_rate": round(delivery_rate, 4),
+            "latency_mean_ms": round(sum(latencies) / len(latencies), 2),
+            "latency_min_ms": round(min(latencies), 2),
+            "latency_max_ms": round(max(latencies), 2),
+            "latency_p95_ms": round(latencies_sorted[p95_idx], 2),
+            "inference_mean_ms": round(
+                sum(infer_times) / len(infer_times), 2),
+            "total_detections": sum(det_counts),
+        })
+
+    if video_rows:
+        timestamps = [float(r["recv_timestamp"]) for r in video_rows]
+        sizes = [int(r["byte_size"]) for r in video_rows]
+        if len(timestamps) >= 2:
+            v_dur = timestamps[-1] - timestamps[0]
+            v_fps = len(timestamps) / v_dur if v_dur > 0 else 0
+            v_bps = sum(sizes) / v_dur if v_dur > 0 else 0
+        else:
+            v_fps = 0
+            v_bps = 0
+        summary["video_frames"] = len(video_rows)
+        summary["video_fps"] = round(v_fps, 2)
+        summary["video_bytes_per_sec"] = round(v_bps, 1)
+
+    if lidar_rows:
+        timestamps = [float(r["recv_timestamp"]) for r in lidar_rows]
+        sizes = [int(r["byte_size"]) for r in lidar_rows]
+        if len(timestamps) >= 2:
+            l_dur = timestamps[-1] - timestamps[0]
+            l_fps = len(timestamps) / l_dur if l_dur > 0 else 0
+            l_bps = sum(sizes) / l_dur if l_dur > 0 else 0
+        else:
+            l_fps = 0
+            l_bps = 0
+        summary["lidar_scans"] = len(lidar_rows)
+        summary["lidar_fps"] = round(l_fps, 2)
+        summary["lidar_bytes_per_sec"] = round(l_bps, 1)
+
+    return summary
 
 
 def main():
@@ -406,6 +447,8 @@ def main():
     # Proxy ports (client connects here instead of directly to server)
     proxy_video_port = 9090
     proxy_meta_port = 9091
+    proxy_lidar_port = 9092
+    server_lidar_port = 8092
 
     # Resolve profiles
     if args.profiles == "all":
@@ -434,13 +477,26 @@ def main():
         sock.settimeout(3)
         sock.connect((args.server_host, args.server_port))
         sock.close()
-        print("[OK] Server reachable\n")
+        print("[OK] Stream server reachable\n")
     except (ConnectionRefusedError, socket.timeout, OSError):
         sys.exit(f"[ERROR] Cannot reach server at "
                  f"{args.server_host}:{args.server_port}\n"
                  f"Start it first:\n"
                  f"  docker exec -it yolo-saad python3 "
                  f"/workspace/stream_server.py")
+
+    # Probe LIDAR — optional
+    lidar_available = False
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        sock.connect((args.server_host, server_lidar_port))
+        sock.close()
+        lidar_available = True
+        print(f"[OK] LIDAR server reachable on :{server_lidar_port}\n")
+    except (ConnectionRefusedError, socket.timeout, OSError):
+        print(f"[INFO] No LIDAR server on :{server_lidar_port} "
+              f"(camera-only experiment)\n")
 
     all_summaries = []
 
@@ -449,6 +505,8 @@ def main():
         "meta_messages", "meta_fps", "delivery_rate",
         "latency_mean_ms", "latency_min_ms", "latency_max_ms",
         "latency_p95_ms", "inference_mean_ms", "total_detections",
+        "video_frames", "video_fps", "video_bytes_per_sec",
+        "lidar_scans", "lidar_fps", "lidar_bytes_per_sec",
     ]
 
     total_runs = len(profile_keys) * args.repeats
@@ -496,37 +554,59 @@ def main():
                 bandwidth_bps=profile["bandwidth_bps"],
                 loss_pct=profile["loss_pct"],
             )
+            lidar_proxy = None
+            if lidar_available:
+                lidar_proxy = ConstrainedProxy(
+                    listen_port=proxy_lidar_port,
+                    dest_host=args.server_host,
+                    dest_port=server_lidar_port,
+                    delay_ms=profile["delay_ms"],
+                    bandwidth_bps=profile["bandwidth_bps"],
+                    loss_pct=profile["loss_pct"],
+                )
 
             video_proxy.start()
             meta_proxy.start()
+            if lidar_proxy:
+                lidar_proxy.start()
 
             # Settle
             print(f"  Settling for {args.settle_time}s...")
             time.sleep(args.settle_time)
 
-            # Run client
+            # Run client (record window timestamps for later server-side comparison)
             print(f"  Running client for {args.duration}s...")
+            run_start_ts = time.time()
             rc = run_client(
                 host="127.0.0.1",
                 port=proxy_video_port,
                 meta_port=proxy_meta_port,
+                lidar_port=proxy_lidar_port,
                 duration=args.duration,
                 output_csv=str(csv_path),
+                no_lidar=not lidar_available,
             )
+            run_end_ts = time.time()
 
             # Stop proxies
             video_proxy.stop()
             meta_proxy.stop()
+            if lidar_proxy:
+                lidar_proxy.stop()
 
             if rc != 0:
                 print(f"  [WARN] Client exited with code {rc}")
 
             rep_summary = parse_client_csv(csv_path)
+            rep_summary["run_start_ts"] = round(run_start_ts, 3)
+            rep_summary["run_end_ts"] = round(run_end_ts, 3)
             rep_summaries.append(rep_summary)
 
-            print(f"  Results: FPS={rep_summary.get('meta_fps', 0):.1f}  "
-                  f"Latency={rep_summary.get('latency_mean_ms', 0):.0f}ms  "
-                  f"Delivery={rep_summary.get('delivery_rate', 0):.1%}")
+            print(f"  Video: {rep_summary.get('video_fps', 0):.1f} FPS / "
+                  f"{rep_summary.get('video_bytes_per_sec', 0) / 1024:.0f} KiB/s  "
+                  f"Meta: {rep_summary.get('meta_fps', 0):.1f} msg/s  "
+                  f"Lidar: {rep_summary.get('lidar_fps', 0):.1f} Hz  "
+                  f"Lat: {rep_summary.get('latency_mean_ms', 0):.0f}ms")
 
             # Brief cooldown between repeats
             if rep < args.repeats:
@@ -579,27 +659,22 @@ def main():
     print()
 
     # Print results table
-    if args.repeats > 1:
-        print(f"  {'Profile':<30s} {'FPS':>10s} {'Lat(ms)':>14s} "
-              f"{'Delivery':>12s} {'Loss':>6s}")
-        print(f"  {'─' * 30} {'─' * 10} {'─' * 14} {'─' * 12} {'─' * 6}")
-        for s in all_summaries:
-            fps_str = f"{s.get('meta_fps', 0):.1f}±{s.get('meta_fps_std', 0):.1f}"
-            lat_str = f"{s.get('latency_mean_ms', 0):.0f}±{s.get('latency_mean_ms_std', 0):.0f}"
-            dr_str = f"{s.get('delivery_rate', 0):.1%}±{s.get('delivery_rate_std', 0):.1%}"
-            print(f"  {s['label']:<30s} {fps_str:>10s} {lat_str:>14s} "
-                  f"{dr_str:>12s} {s['loss_pct']:>5.1f}%")
-    else:
-        print(f"  {'Profile':<30s} {'FPS':>6s} {'Lat(ms)':>8s} "
-              f"{'Delivery':>9s} {'Loss':>6s}")
-        print(f"  {'─' * 30} {'─' * 6} {'─' * 8} {'─' * 9} {'─' * 6}")
-        for s in all_summaries:
-            print(f"  {s['label']:<30s} "
-                  f"{s.get('meta_fps', 0):>6.1f} "
-                  f"{s.get('latency_mean_ms', 0):>8.1f} "
-                  f"{s.get('delivery_rate', 0):>8.1%} "
-                  f"{s['loss_pct']:>5.1f}%")
-    print(f"{'=' * 65}\n")
+    print(f"  {'Profile':<32s} {'Video FPS':>10s} {'Meta FPS':>9s} "
+          f"{'Lidar Hz':>9s} {'Lat(ms)':>8s} {'Loss':>6s}")
+    print(f"  {'─' * 32} {'─' * 10} {'─' * 9} {'─' * 9} {'─' * 8} {'─' * 6}")
+    for s in all_summaries:
+        if args.repeats > 1:
+            v_str = f"{s.get('video_fps', 0):.1f}±{s.get('video_fps_std', 0):.1f}"
+            m_str = f"{s.get('meta_fps', 0):.1f}±{s.get('meta_fps_std', 0):.1f}"
+            l_str = f"{s.get('lidar_fps', 0):.1f}±{s.get('lidar_fps_std', 0):.1f}"
+        else:
+            v_str = f"{s.get('video_fps', 0):.1f}"
+            m_str = f"{s.get('meta_fps', 0):.1f}"
+            l_str = f"{s.get('lidar_fps', 0):.1f}"
+        print(f"  {s['label']:<32s} {v_str:>10s} {m_str:>9s} {l_str:>9s} "
+              f"{s.get('latency_mean_ms', 0):>8.0f} "
+              f"{s['loss_pct']:>5.1f}%")
+    print(f"{'=' * 75}\n")
 
 
 if __name__ == "__main__":
