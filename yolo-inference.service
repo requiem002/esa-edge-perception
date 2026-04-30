@@ -1,6 +1,8 @@
 [Unit]
-Description=YOLO Inference Pipeline (Jetson / Docker)
-After=docker.service
+Description=YOLO Inference Pipeline (Jetson / yolo-saad container)
+Documentation=https://github.com/requiem002/esa-edge-perception
+After=docker.service network-online.target
+Wants=network-online.target
 Requires=docker.service
 
 [Service]
@@ -8,20 +10,24 @@ Type=simple
 User=esa_jetson
 Environment=HOME=/home/esa_jetson
 
-# Start the existing container, then run inference headless
+# The yolo-saad container was committed from yolo-orin:v2.
+# We do NOT recreate it here — only start it if stopped.
 ExecStartPre=/usr/bin/docker start yolo-saad
+
+# Headless inference: saves output/detect_*.avi and detections_*.csv
+# under ~/Desktop/output (which is /workspace/output inside the container).
 ExecStart=/usr/bin/docker exec yolo-saad python3 /workspace/inference.py --no-display
 
-# On stop: kill the python process inside the container gracefully
-ExecStop=/usr/bin/docker exec yolo-saad pkill -TERM -f "python3 /workspace/inference.py"
+# Graceful stop, then SIGKILL after timeout.
+ExecStop=/usr/bin/docker exec yolo-saad pkill -TERM -f "/workspace/inference.py"
 KillMode=mixed
 TimeoutStopSec=15
 
-# Auto-restart on crash (10s cooldown)
+# Auto-restart on crash with backoff to avoid tight loops.
 Restart=on-failure
 RestartSec=10
 
-# Logging
+# Logs land in journald — view with: journalctl -u yolo-inference.service -f
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=yolo-inference
