@@ -8,6 +8,7 @@
 #   ./run.sh --status          print status.py dashboard
 #   ./run.sh --experiment      full network degradation experiment
 #                              (6 profiles, 60s, 3 repeats)
+#   ./run.sh --dashboard       start mission control dashboard on :8080
 #   ./run.sh --help            show this message
 #
 # Any extra args are forwarded to inference.py (default mode only):
@@ -56,10 +57,14 @@ INFERENCE_EXTRA=()
 if [[ ${#@} -gt 0 ]]; then
     case "$1" in
         --help|-h)        usage ;;
-        --stream)         MODE="stream"     ; shift ;;
-        --status)         MODE="status"     ; shift ;;
-        --experiment)     MODE="experiment" ; shift ;;
-        --no-display)     MODE="inference"  ; INFERENCE_EXTRA+=("$1") ; shift ;;
+        --stream)         MODE="stream"      ; shift ;;
+        --status)         MODE="status"      ; shift ;;
+        --experiment)     MODE="experiment"  ; shift ;;
+        --dashboard)      MODE="dashboard"   ; shift ;;
+        --sim-capture)    MODE="sim-capture" ; shift ;;
+        --go2-api)        MODE="go2-api"     ; shift ;;
+        --sim)            MODE="sim"         ; shift ;;
+        --no-display)     MODE="inference"   ; INFERENCE_EXTRA+=("$1") ; shift ;;
         *)                MODE="inference"  ;;
     esac
 fi
@@ -151,6 +156,89 @@ case "${MODE}" in
 
         echo
         echo "[run.sh] Experiment complete: ${OUT_DIR}"
+        ;;
+
+    # ── Mission Control Dashboard ────────────────────────────────────
+    dashboard)
+        echo "[run.sh] Starting mission control dashboard on :8080..."
+        pip3 install -q fastapi uvicorn wsproto 2>/dev/null
+        nohup python3 "${DESKTOP}/dashboard_server.py" \
+            > "${DESKTOP}/dashboard.log" 2>&1 &
+        echo $! > /tmp/dashboard.pid
+        sleep 1
+        JETSON_IP=$(hostname -I | awk '{print $1}')
+        echo "[run.sh] Dashboard: http://${JETSON_IP}:8080"
+        ;;
+
+    # ── MuJoCo screen capture ────────────────────────────────────────
+    sim-capture)
+        export DISPLAY="${DISPLAY:-:0}"
+        echo "[run.sh] Starting MuJoCo screen capture on :8093..."
+        nohup python3 "${DESKTOP}/sim_capture.py" \
+            > /tmp/sim_capture.log 2>&1 &
+        echo $! > /tmp/sim_capture.pid
+        sleep 1
+        JETSON_IP=$(hostname -I | awk '{print $1}')
+        echo "[run.sh] Sim feed: http://${JETSON_IP}:8093/sim-stream"
+        ;;
+
+    # ── Go2 control API ──────────────────────────────────────────────
+    go2-api)
+        TARGET="${INFERENCE_EXTRA[0]:-sim}"
+        echo "[run.sh] Starting Go2 control API on :8094 (target: ${TARGET})..."
+        nohup python3 "${DESKTOP}/go2_api.py" \
+            --target "${TARGET}" \
+            > /tmp/go2_api.log 2>&1 &
+        echo $! > /tmp/go2_api.pid
+        echo "[run.sh] Go2 API: http://127.0.0.1:8094/status"
+        ;;
+
+    # ── Simulator integration (MuJoCo + Go2 API + screen capture) ────
+    sim)
+        export DISPLAY="${DISPLAY:-:0}"
+        echo
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  FENRIR-1 SIMULATOR SETUP"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo
+        echo "  You need to start the MuJoCo simulator MANUALLY first."
+        echo "  Open a separate terminal and run:"
+        echo
+        echo "    cd ~/unitree_mujoco/simulate_python"
+        echo "    python3 unitree_mujoco.py"
+        echo
+        echo "  The MuJoCo viewer window will open showing the Go2 robot."
+        echo "  The simulator uses DOMAIN_ID=1 on loopback (lo interface)"
+        echo "  and communicates with go2_api.py via DDS."
+        echo
+        echo "  (Optional) For YOLO on simulated camera via virtual webcam:"
+        echo "    sudo modprobe v4l2loopback devices=1 video_nr=2 card_label=MuJoCo_Sim exclusive_caps=1"
+        echo "    python3 ~/unitree_mujoco/sim_camera_feed.py"
+        echo "    # then: ./run.sh --stream  (adds --source 2 inside container)"
+        echo
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        read -p "  Press Enter once the MuJoCo viewer window is open... "
+        echo
+        echo "[run.sh] Starting MuJoCo screen capture on :8093..."
+        nohup python3 "${DESKTOP}/sim_capture.py" \
+            > /tmp/sim_capture.log 2>&1 &
+        echo $! > /tmp/sim_capture.pid
+        sleep 2
+        echo "[run.sh] Starting Go2 control API on :8094 (target: sim)..."
+        nohup python3 "${DESKTOP}/go2_api.py" \
+            --target sim \
+            > /tmp/go2_api.log 2>&1 &
+        echo $! > /tmp/go2_api.pid
+        JETSON_IP=$(hostname -I | awk '{print $1}')
+        echo
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  Simulator services ready:"
+        echo "    Sim view:  http://${JETSON_IP}:8093/sim-stream"
+        echo "    Go2 API:   http://${JETSON_IP}:8094/status"
+        echo "  Open the dashboard and click [▶ SHOW SIM] to see the viewer."
+        echo "  Use [▲ STAND] / [▼ CROUCH] in the Robot Control panel."
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo
         ;;
 
     *)

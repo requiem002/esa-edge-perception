@@ -181,8 +181,8 @@ def main():
                         help="MJPEG HTTP port (default: 8090)")
     parser.add_argument("--meta-port", type=int, default=8091,
                         help="TCP metadata port (default: 8091)")
-    parser.add_argument("--jpeg-quality", type=int, default=70,
-                        help="JPEG quality 1-100 (default: 70)")
+    parser.add_argument("--jpeg-quality", type=int, default=30,
+                        help="JPEG quality 1-100 (default: 30)")
     parser.add_argument("--log", default=None,
                         help="Path for server-side per-frame CSV log "
                              "(e.g. /workspace/server_log.csv)")
