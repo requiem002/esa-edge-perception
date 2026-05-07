@@ -62,6 +62,7 @@ if [[ ${#@} -gt 0 ]]; then
         --experiment)     MODE="experiment"  ; shift ;;
         --dashboard)      MODE="dashboard"   ; shift ;;
         --sim-capture)    MODE="sim-capture" ; shift ;;
+        --sim-cam)        MODE="sim-cam"     ; shift ;;
         --go2-api)        MODE="go2-api"     ; shift ;;
         --sim)            MODE="sim"         ; shift ;;
         --no-display)     MODE="inference"   ; INFERENCE_EXTRA+=("$1") ; shift ;;
@@ -180,6 +181,49 @@ case "${MODE}" in
         sleep 1
         JETSON_IP=$(hostname -I | awk '{print $1}')
         echo "[run.sh] Sim feed: http://${JETSON_IP}:8093/sim-stream"
+        ;;
+
+    # ── MuJoCo virtual camera → /dev/video2 (physical stays on /dev/video0) ──
+    sim-cam)
+        SIM_CAM_SCRIPT="${HOME}/unitree_mujoco/sim_camera_feed.py"
+        if [[ ! -f "${SIM_CAM_SCRIPT}" ]]; then
+            echo "[run.sh] ERROR: ${SIM_CAM_SCRIPT} not found."
+            exit 1
+        fi
+        echo "[run.sh] Setting up MuJoCo virtual webcam on /dev/video2..."
+        echo "         Physical camera (/dev/video0) and LiDAR are unaffected."
+        echo
+        # Load v4l2loopback if not already present
+        if ! lsmod | grep -q v4l2loopback; then
+            echo "[run.sh] Loading v4l2loopback kernel module (requires sudo)..."
+            sudo modprobe v4l2loopback devices=1 video_nr=2 \
+                card_label="MuJoCo_Sim" exclusive_caps=1 || {
+                echo "[run.sh] ERROR: Could not load v4l2loopback."
+                echo "         Install first: sudo apt install v4l2loopback-dkms v4l2loopback-utils"
+                exit 1
+            }
+            echo "[run.sh] v4l2loopback loaded — /dev/video2 created."
+        else
+            echo "[run.sh] v4l2loopback already loaded."
+        fi
+        if ! python3 -c "import pyfakewebcam" 2>/dev/null; then
+            echo "[run.sh] Installing pyfakewebcam..."
+            pip3 install -q --user pyfakewebcam
+        fi
+        nohup python3 "${SIM_CAM_SCRIPT}" \
+            > /tmp/sim_cam.log 2>&1 &
+        echo $! > /tmp/sim_cam.pid
+        sleep 2
+        echo
+        echo "[run.sh] Virtual cam active: /dev/video2 (MuJoCo front camera at 30fps)"
+        echo "[run.sh] To run YOLO on the simulated camera, restart the container"
+        echo "         with /dev/video2 mapped, then:"
+        echo "           ./run.sh --source /dev/video2"
+        echo "         or (inside container):"
+        echo "           python3 /workspace/stream_server.py --source 2"
+        echo
+        echo "[run.sh] Physical camera (./run.sh) and LiDAR (./run.sh --stream)"
+        echo "         continue to use /dev/video0 as normal."
         ;;
 
     # ── Go2 control API ──────────────────────────────────────────────

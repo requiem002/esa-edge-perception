@@ -34,7 +34,11 @@ args = parser.parse_args()
 sdk_available = False
 sdk_error = ""
 last_command = "none"
+last_command_time: float = 0.0
+DEBOUNCE_S = 2.0          # reject duplicate commands within this window
 GO2_CMD = str(Path.home() / "unitree_mujoco" / "go2_bridge" / "go2_cmd.py")
+
+_cmd_lock = asyncio.Lock()   # prevents concurrent subprocess launches
 
 app = FastAPI()
 
@@ -62,34 +66,52 @@ else:
 # ─── Command execution ────────────────────────────────────────────────────────
 
 async def run_go2_cmd(action: str) -> dict:
-    """Execute go2_cmd.py as a subprocess (fire-and-forget)."""
-    global last_command
+    """Execute go2_cmd.py as a subprocess (fire-and-forget) with debounce."""
+    global last_command, last_command_time
+
     if not Path(GO2_CMD).exists():
         return {"success": False, "command": action,
                 "message": f"go2_cmd.py not found at {GO2_CMD}"}
-    try:
-        # Run in background — motion takes ~1.5s, don't block the API
-        subprocess.Popen(
-            [sys.executable, GO2_CMD, action],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        last_command = action
-        target_label = "simulator" if args.target == "sim" else "real robot"
-        return {"success": True, "command": action,
-                "message": f"{action.capitalize()} sent to {target_label}"}
-    except Exception as e:
-        return {"success": False, "command": action, "message": str(e)}
+
+    # Debounce: each pose transition takes ~1.5s — reject rapid repeats
+    now = time.time()
+    elapsed = now - last_command_time
+    if elapsed < DEBOUNCE_S:
+        wait = round(DEBOUNCE_S - elapsed, 1)
+        return {"success": False, "command": action,
+                "message": f"Motion in progress — retry in {wait}s"}
+
+    # Lock prevents two commands racing through the debounce check simultaneously
+    if _cmd_lock.locked():
+        return {"success": False, "command": action,
+                "message": "Another command is already being dispatched"}
+
+    async with _cmd_lock:
+        try:
+            subprocess.Popen(
+                [sys.executable, GO2_CMD, action],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            last_command = action
+            last_command_time = time.time()
+            target_label = "simulator" if args.target == "sim" else "real robot"
+            return {"success": True, "command": action,
+                    "message": f"{action.capitalize()} sent to {target_label}"}
+        except Exception as e:
+            return {"success": False, "command": action, "message": str(e)}
 
 # ─── Routes ──────────────────────────────────────────────────────────────────
 
 @app.get("/status")
 async def status():
+    elapsed = time.time() - last_command_time
     return {
         "target": args.target,
         "sdk_connected": sdk_available,
         "sdk_error": sdk_error if not sdk_available else "",
         "last_command": last_command,
+        "ready": elapsed >= DEBOUNCE_S,
         "go2_cmd_path": GO2_CMD,
     }
 

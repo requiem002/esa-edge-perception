@@ -52,9 +52,10 @@ stop_on_host    "network_test.py"
 stop_on_host    "stream_client.py"
 stop_on_host    "dashboard_server.py"
 stop_on_host    "sim_capture.py"
+stop_on_host    "sim_camera_feed.py"
 stop_on_host    "go2_api.py"
 
-for pidfile in /tmp/dashboard.pid /tmp/sim_capture.pid /tmp/go2_api.pid; do
+for pidfile in /tmp/dashboard.pid /tmp/sim_capture.pid /tmp/sim_cam.pid /tmp/go2_api.pid; do
     if [ -f "${pidfile}" ]; then
         kill "$(cat "${pidfile}")" 2>/dev/null || true
         rm "${pidfile}"
