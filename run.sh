@@ -173,9 +173,9 @@ case "${MODE}" in
 
     # ── MuJoCo screen capture ────────────────────────────────────────
     sim-capture)
-        export DISPLAY="${DISPLAY:-:0}"
+        export DISPLAY="${DISPLAY:-:1}"
         echo "[run.sh] Starting MuJoCo screen capture on :8093..."
-        nohup python3 "${DESKTOP}/sim_capture.py" \
+        DISPLAY="${DISPLAY}" nohup python3 "${DESKTOP}/sim_capture.py" \
             > /tmp/sim_capture.log 2>&1 &
         echo $! > /tmp/sim_capture.pid
         sleep 1
@@ -264,7 +264,7 @@ case "${MODE}" in
         read -p "  Press Enter once the MuJoCo viewer window is open... "
         echo
         echo "[run.sh] Starting MuJoCo screen capture on :8093..."
-        nohup python3 "${DESKTOP}/sim_capture.py" \
+        DISPLAY="${DISPLAY:-:1}" nohup python3 "${DESKTOP}/sim_capture.py" \
             > /tmp/sim_capture.log 2>&1 &
         echo $! > /tmp/sim_capture.pid
         sleep 2

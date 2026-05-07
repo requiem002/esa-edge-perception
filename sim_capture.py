@@ -23,7 +23,7 @@ from fastapi.responses import StreamingResponse, HTMLResponse
 parser = argparse.ArgumentParser(description="MuJoCo window MJPEG capture")
 parser.add_argument("--port", type=int, default=8093)
 parser.add_argument("--fps", type=int, default=10)
-parser.add_argument("--display", default=":0")
+parser.add_argument("--display", default=os.environ.get("DISPLAY", ":0"))
 args = parser.parse_args()
 
 WINDOW_NAMES = ["MuJoCo", "unitree", "Go2", "Fenrir", "mujoco"]
@@ -80,6 +80,23 @@ def find_window_geom():
 
 # ─── ffmpeg process ───────────────────────────────────────────────────────────
 
+def _screen_size(display: str):
+    """Return (width, height) of the display, or (None, None) on failure."""
+    try:
+        out = subprocess.check_output(
+            ["xdpyinfo", "-display", display],
+            stderr=subprocess.DEVNULL, timeout=2,
+        ).decode()
+        for line in out.splitlines():
+            if "dimensions:" in line:
+                dims = line.split()[1]          # e.g. "3440x1440"
+                sw, sh = dims.split("x")
+                return int(sw), int(sh)
+    except Exception:
+        pass
+    return None, None
+
+
 def start_ffmpeg(geom):
     global _ffmpeg_proc
     if _ffmpeg_proc and _ffmpeg_proc.poll() is None:
@@ -92,6 +109,16 @@ def start_ffmpeg(geom):
 
     x, y, w, h = geom["x"], geom["y"], geom["w"], geom["h"]
     display = args.display
+
+    # Clamp capture area to screen boundaries — ffmpeg rejects out-of-bounds rects
+    sw, sh = _screen_size(display)
+    if sw is not None:
+        w = min(w, sw - x)
+        h = min(h, sh - y)
+    if w <= 0 or h <= 0:
+        print(f"[sim_capture] Window at {x},{y} is fully off-screen — skipping")
+        return None
+
     cmd = [
         "ffmpeg", "-loglevel", "quiet",
         "-f", "x11grab",
@@ -109,7 +136,7 @@ def start_ffmpeg(geom):
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
-        print(f"[sim_capture] ffmpeg started: {w}x{h} at {x},{y}")
+        print(f"[sim_capture] ffmpeg started: {w}x{h} at {x},{y} on {display}")
         return _ffmpeg_proc
     except FileNotFoundError:
         print("[sim_capture] ffmpeg not found. Install: sudo apt-get install -y ffmpeg")
