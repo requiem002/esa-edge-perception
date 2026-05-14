@@ -757,11 +757,15 @@ async def health():
 
 @app.get("/video")
 async def proxy_video():
-    """Low-latency MJPEG proxy using raw asyncio sockets."""
+    """MJPEG proxy. Routes through ConstrainedHTTPProxy on 9090 when sim is active,
+    otherwise connects directly to stream_server on 8090. Both live on 127.0.0.1 so
+    this endpoint is always reachable regardless of where the browser is."""
+    video_port = 9090 if active_sim_profile else 8090
+
     async def stream_mjpeg():
         try:
             reader, writer = await asyncio.wait_for(
-                asyncio.open_connection("127.0.0.1", 8090), timeout=3.0)
+                asyncio.open_connection("127.0.0.1", video_port), timeout=3.0)
         except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
             return
         try:
@@ -1896,16 +1900,17 @@ function renderSession(totals){
 // ── Video signal ─────────────────────────────────────────────────────────────
 const vfeed = document.getElementById('vfeed');
 
-// FIX: Point directly to port 8090 to bypass Python proxy buffering backlog
-const directVideoUrl = 'http://' + window.location.hostname + ':8090/stream';
-vfeed.src = directVideoUrl;
+// Always use the dashboard's /video endpoint. The server routes internally to
+// port 8090 (direct) or port 9090 (ConstrainedHTTPProxy) based on sim state,
+// so this URL is reachable regardless of where the browser is running.
+vfeed.src = '/video';
 
 let videoRetryTimer = null;
 function scheduleVideoRetry() {
   if (videoRetryTimer) return;
   videoRetryTimer = setTimeout(() => {
     videoRetryTimer = null;
-    vfeed.src = directVideoUrl + '?t=' + Date.now();
+    vfeed.src = '/video?t=' + Date.now();
   }, 5000);
 }
 vfeed.onerror=()=>{
@@ -1957,8 +1962,8 @@ function netStart(profile){
         activeNetProfile=profile;
         updateNetSimUI();
         showToast('SIM ACTIVE: '+profileLabels[profile]);
-        // Route video through the MJPEG-frame-aware constrained proxy on port 9090
-        vfeed.src='http://'+window.location.hostname+':9090/stream?t='+Date.now();
+        // Reconnect /video — server now picks port 9090 (constrained proxy)
+        vfeed.src='/video?t='+Date.now();
       }
     })
     .catch(()=>showToast('Network sim error'));
@@ -1972,8 +1977,8 @@ function netStop(){
         activeNetProfile=null;
         updateNetSimUI();
         showToast('SIMULATION STOPPED');
-        // Restore direct connection to the camera stream on port 8090
-        vfeed.src=directVideoUrl+'?t='+Date.now();
+        // Reconnect /video — server now picks port 8090 (direct)
+        vfeed.src='/video?t='+Date.now();
       }
     })
     .catch(()=>showToast('Network sim error'));
@@ -2063,8 +2068,8 @@ function eStop(){
   logActive=false;
   activeNetProfile=null;
   updateNetSimUI();
-  // Restore direct video connection in case sim proxy was active
-  vfeed.src=directVideoUrl+'?t='+Date.now();
+  // Reconnect /video — drops any active proxy connection
+  vfeed.src='/video?t='+Date.now();
   document.getElementById('logDot').className='sdot d';
   document.getElementById('logSt').textContent='INACTIVE';
   document.getElementById('logBtn').textContent='▶ START';
