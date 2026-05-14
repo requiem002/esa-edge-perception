@@ -165,10 +165,15 @@ class ConstrainedHTTPProxy:
     @property
     def fps(self) -> float:
         ft = self._frame_times
-        if len(ft) < 2:
+        try:
+            if len(ft) < 2:
+                return 0.0
+            span = ft[-1] - ft[0]
+            return (len(ft) - 1) / span if span > 0 else 0.0
+        except (IndexError, ZeroDivisionError):
+            # Deque can shrink between len() check and index access (GIL is not
+            # held across the pair of operations) — return 0 rather than crash.
             return 0.0
-        span = ft[-1] - ft[0]
-        return (len(ft) - 1) / span if span > 0 else 0.0
 
     def _run(self):
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -242,7 +247,10 @@ class ConstrainedHTTPProxy:
                     if not stripped:
                         break  # blank line = end of part headers
                     if stripped.lower().startswith(b"content-length:"):
-                        content_length = int(stripped.split(b":", 1)[1].strip())
+                        try:
+                            content_length = int(stripped.split(b":", 1)[1].strip())
+                        except (ValueError, IndexError):
+                            pass
 
                 if content_length is None:
                     continue  # can't read frame without knowing its size
