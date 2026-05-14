@@ -122,6 +122,167 @@ class ConstrainedProxy:
             try: dst.close()
             except OSError: pass
 
+# ─── ConstrainedHTTPProxy (MJPEG-frame-aware) ────────────────────────────────
+
+class ConstrainedHTTPProxy:
+    """MJPEG-frame-aware HTTP proxy.
+
+    Connects to an upstream multipart/x-mixed-replace MJPEG stream, parses
+    --frame boundaries, extracts complete JPEG frames, and applies per-frame
+    network constraints before re-emitting a valid MJPEG stream to clients.
+    Byte-level throttling on a continuous HTTP stream doesn't reduce FPS;
+    operating at the frame level does.
+    """
+
+    def __init__(self, listen_port, upstream_host, upstream_port,
+                 upstream_path="/stream",
+                 delay_ms=0, bandwidth_bps=0, loss_pct=0.0):
+        self.listen_port = listen_port
+        self.upstream_host = upstream_host
+        self.upstream_port = upstream_port
+        self.upstream_path = upstream_path
+        self.delay_ms = delay_ms
+        self.bandwidth_bps = bandwidth_bps
+        self.loss_pct = loss_pct
+        self._stop = threading.Event()
+        self._server = None
+        self._thread = None
+        self.frames_forwarded = 0
+        self.frames_dropped = 0
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._server:
+            self._server.close()
+        if self._thread:
+            self._thread.join(timeout=3)
+
+    def _run(self):
+        self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._server.bind(("127.0.0.1", self.listen_port))
+        self._server.listen(4)
+        self._server.settimeout(1.0)
+        while not self._stop.is_set():
+            try:
+                client_conn, _ = self._server.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            threading.Thread(
+                target=self._handle_client, args=(client_conn,), daemon=True
+            ).start()
+        self._server.close()
+
+    def _handle_client(self, client_conn):
+        upstream_sock = None
+        try:
+            # Drain incoming client HTTP request
+            client_conn.settimeout(5.0)
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                chunk = client_conn.recv(1024)
+                if not chunk:
+                    return
+                buf += chunk
+
+            # Open upstream MJPEG connection
+            upstream_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            upstream_sock.settimeout(10.0)
+            upstream_sock.connect((self.upstream_host, self.upstream_port))
+            upstream_sock.sendall(
+                f"GET {self.upstream_path} HTTP/1.0\r\n"
+                f"Host: {self.upstream_host}\r\n\r\n".encode()
+            )
+
+            upstream_file = upstream_sock.makefile("rb")
+
+            # Skip upstream HTTP response headers
+            while True:
+                line = upstream_file.readline()
+                if line in (b"\r\n", b"\n", b""):
+                    break
+
+            # Send our response headers to the client
+            client_conn.sendall(
+                b"HTTP/1.0 200 OK\r\n"
+                b"Content-Type: multipart/x-mixed-replace; boundary=frame\r\n"
+                b"Cache-Control: no-cache\r\n"
+                b"\r\n"
+            )
+
+            # Parse and proxy frames one at a time
+            while not self._stop.is_set():
+                # Find the next --frame boundary line
+                boundary = upstream_file.readline()
+                if not boundary:
+                    break
+                if not boundary.strip().startswith(b"--"):
+                    continue  # skip preamble / blank lines
+
+                # Parse MIME headers for this part
+                content_length = None
+                while True:
+                    header = upstream_file.readline()
+                    stripped = header.strip()
+                    if not stripped:
+                        break  # blank line = end of part headers
+                    if stripped.lower().startswith(b"content-length:"):
+                        content_length = int(stripped.split(b":", 1)[1].strip())
+
+                if content_length is None:
+                    continue  # can't read frame without knowing its size
+
+                # Read exactly content_length bytes of JPEG data
+                jpeg_bytes = upstream_file.read(content_length)
+                if len(jpeg_bytes) < content_length:
+                    break  # upstream closed mid-frame
+
+                # Per-frame: propagation delay
+                if self.delay_ms > 0:
+                    time.sleep(self.delay_ms / 1000.0)
+
+                # Per-frame: packet loss
+                if self.loss_pct > 0 and random.random() * 100 < self.loss_pct:
+                    self.frames_dropped += 1
+                    continue
+
+                # Per-frame: bandwidth pacing
+                if self.bandwidth_bps > 0:
+                    time.sleep(len(jpeg_bytes) / self.bandwidth_bps)
+
+                # Re-emit a valid MJPEG part to the client
+                out = (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n"
+                    + f"Content-Length: {len(jpeg_bytes)}\r\n".encode()
+                    + b"\r\n"
+                    + jpeg_bytes
+                    + b"\r\n"
+                )
+                client_conn.sendall(out)
+                self.frames_forwarded += 1
+
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        except Exception:
+            pass
+        finally:
+            try:
+                client_conn.close()
+            except OSError:
+                pass
+            if upstream_sock:
+                try:
+                    upstream_sock.close()
+                except OSError:
+                    pass
+
 # ─── Profile Maps ─────────────────────────────────────────────────────────────
 
 SIM_PROFILE_MAP = {
@@ -169,6 +330,7 @@ active_meta_port: int = args.meta_port
 active_lidar_port: int = args.lidar_port
 active_sim_profile: Optional[str] = None
 sim_proxies: list = []
+camera_port_alive: bool = False
 meta_reader_task: Optional[asyncio.Task] = None
 lidar_reader_task: Optional[asyncio.Task] = None
 go2_api_proc = None
@@ -213,6 +375,12 @@ async def gpu_temp_poller():
         system_state_hw["gpu_temp_c"] = t
         system_state_hw["gpu_status"] = gpu_status_label(t)
         await asyncio.sleep(2)
+
+async def camera_port_poller():
+    global camera_port_alive
+    while True:
+        camera_port_alive = await _port_open("127.0.0.1", 8090)
+        await asyncio.sleep(2.0)
 
 # ─── FPS/Hz Sliding Window ────────────────────────────────────────────────────
 
@@ -484,12 +652,18 @@ def build_telemetry() -> dict:
     m_last = now - meta_state["last_seen"] if meta_state["last_seen"] else 999.0
     l_last = now - lidar_state["last_seen"] if lidar_state["last_seen"] else 999.0
 
+    # Track each stream independently:
+    #   cam_alive  — camera MJPEG port 8090 is TCP-connectable
+    #   m_alive    — metadata stream on port 8091 is delivering frames
+    #   l_alive    — LiDAR stream on port 8092 is delivering scans
+    cam_alive = True if args.mock else camera_port_alive
     m_alive = m_last < 5.0 and meta_state["active"]
     l_alive = l_last < 5.0 and lidar_state["active"]
 
-    if m_alive and l_alive:
+    n_alive = sum([cam_alive, m_alive, l_alive])
+    if n_alive == 3:
         sys_state = "online"
-    elif m_alive or l_alive:
+    elif n_alive > 0:
         sys_state = "degraded"
     else:
         sys_state = "offline"
@@ -511,18 +685,18 @@ def build_telemetry() -> dict:
         "system_state": sys_state,
         "active_network_profile": active_label,
         "camera": {
-            "active": meta_state["active"],
-            "fps": meta_state["fps"],
+            "active": cam_alive,
+            "fps": meta_state["fps"] if m_alive else 0.0,
             "inference_ms": meta_state["inference_ms"],
             "frame_number": meta_state["frame_number"],
             "jpeg_bytes": meta_state["jpeg_bytes"],
             "last_seen_s": round(m_last, 2),
-            "send_timestamp":meta_state.get("send_timestamp", 0.0),
+            "send_timestamp": meta_state.get("send_timestamp", 0.0),
         },
         "detections": {"count": len(det_items), "classes": det_classes, "items": det_items},
         "lidar": {
             "active": lidar_state["active"],
-            "hz": lidar_state["hz"],
+            "hz": lidar_state["hz"] if l_alive else 0.0,
             "scan_id": lidar_state["scan_id"],
             "num_points": lidar_state["num_points"],
             "points": lidar_state["points"],
@@ -536,9 +710,9 @@ def build_telemetry() -> dict:
             "uptime_s": round(now - START_TIME, 1),
         },
         "streams": {
-            "video_alive": m_alive,
-            "meta_alive": m_alive,
-            "lidar_alive": l_alive,
+            "video_alive": cam_alive,   # camera MJPEG port 8090
+            "meta_alive": m_alive,      # metadata stream port 8091
+            "lidar_alive": l_alive,     # LiDAR stream port 8092
         },
         "network": dict(network_state),
         "session_totals": session_totals,
@@ -693,11 +867,13 @@ async def network_sim_start(profile: str):
     sim_proxies.clear()
 
     params = SIM_PROFILE_MAP[profile]
+    vp = ConstrainedHTTPProxy(9090, "127.0.0.1", 8090, "/stream", **params)
     mp = ConstrainedProxy(9091, "127.0.0.1", args.meta_port, **params)
     lp = ConstrainedProxy(9092, "127.0.0.1", args.lidar_port, **params)
+    vp.start()
     mp.start()
     lp.start()
-    sim_proxies.extend([mp, lp])
+    sim_proxies.extend([vp, mp, lp])
 
     active_sim_profile = profile
     active_meta_port = 9091
@@ -798,6 +974,7 @@ async def startup():
         meta_reader_task = asyncio.create_task(meta_reader())
         lidar_reader_task = asyncio.create_task(lidar_reader())
         asyncio.create_task(gpu_temp_poller())
+        asyncio.create_task(camera_port_poller())
     asyncio.create_task(telemetry_broadcaster())
     print(f"[dashboard] Serving at http://{args.host}:{args.port}")
 
@@ -1028,7 +1205,7 @@ body.degraded #degradedBar{display:flex;}
       <div class="ph">[ &#9672; CAMERA FEED ]</div>
       <div class="pb" style="position:relative;">
         <div id="vcont">
-        <img id="vfeed" src="" alt=""> <div id="nosig">[ NO SIGNAL ]</div>
+        <img id="vfeed" src="" alt=""> <div id="nosig">[ CAMERA OFFLINE ]</div>
         <div id="livebadge"><span class="blink">&#9632;</span> LIVE</div>
         <div id="oTL" style="position:absolute;top:6px;left:8px;font-size:0.62rem;color:var(--green-bright);background:rgba(0,0,0,0.55);padding:1px 5px;">AGE: <span id="vAge">--.-</span>s</div>
         <div id="oBL">DET: <span id="ovDet">000</span></div>
@@ -1298,8 +1475,8 @@ function handleTelemetry(d) {
   // Health dots force-red when offline
   const forceRed = d.system_state==='offline';
 
-  // Camera panel
-  const dead = !cam.active || cam.last_seen_s > 5;
+  // Camera panel — uses video_alive (port 8090 TCP check) independently
+  const dead = !st.video_alive;
   document.getElementById('nosig').style.display = dead ? 'flex' : 'none';
   document.getElementById('vfeed').style.display = dead ? 'none' : 'block';
   document.getElementById('ovDet').textContent = String(det.count).padStart(3,'0');
@@ -1780,6 +1957,8 @@ function netStart(profile){
         activeNetProfile=profile;
         updateNetSimUI();
         showToast('SIM ACTIVE: '+profileLabels[profile]);
+        // Route video through the MJPEG-frame-aware constrained proxy on port 9090
+        vfeed.src='http://'+window.location.hostname+':9090/stream?t='+Date.now();
       }
     })
     .catch(()=>showToast('Network sim error'));
@@ -1789,7 +1968,13 @@ function netStop(){
   fetch('/control/network/stop',{method:'POST'})
     .then(r=>r.json())
     .then(data=>{
-      if(data.ok){activeNetProfile=null;updateNetSimUI();showToast('SIMULATION STOPPED');}
+      if(data.ok){
+        activeNetProfile=null;
+        updateNetSimUI();
+        showToast('SIMULATION STOPPED');
+        // Restore direct connection to the camera stream on port 8090
+        vfeed.src=directVideoUrl+'?t='+Date.now();
+      }
     })
     .catch(()=>showToast('Network sim error'));
 }
@@ -1878,6 +2063,8 @@ function eStop(){
   logActive=false;
   activeNetProfile=null;
   updateNetSimUI();
+  // Restore direct video connection in case sim proxy was active
+  vfeed.src=directVideoUrl+'?t='+Date.now();
   document.getElementById('logDot').className='sdot d';
   document.getElementById('logSt').textContent='INACTIVE';
   document.getElementById('logBtn').textContent='▶ START';
