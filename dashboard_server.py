@@ -149,6 +149,7 @@ class ConstrainedHTTPProxy:
         self._thread = None
         self.frames_forwarded = 0
         self.frames_dropped = 0
+        self._frame_times: deque = deque()  # timestamps of forwarded frames for fps calc
 
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -160,6 +161,14 @@ class ConstrainedHTTPProxy:
             self._server.close()
         if self._thread:
             self._thread.join(timeout=3)
+
+    @property
+    def fps(self) -> float:
+        ft = self._frame_times
+        if len(ft) < 2:
+            return 0.0
+        span = ft[-1] - ft[0]
+        return (len(ft) - 1) / span if span > 0 else 0.0
 
     def _run(self):
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -267,6 +276,12 @@ class ConstrainedHTTPProxy:
                 )
                 client_conn.sendall(out)
                 self.frames_forwarded += 1
+                # Record frame time for fps calculation (5-second sliding window)
+                t = time.time()
+                self._frame_times.append(t)
+                cutoff = t - 5.0
+                while self._frame_times and self._frame_times[0] < cutoff:
+                    self._frame_times.popleft()
 
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
@@ -436,10 +451,19 @@ def compute_network_metrics():
     while lidar_bw_window and lidar_bw_window[0][0] < cutoff:
         lidar_bw_window.popleft()
 
-    fps = meta_state["fps"]
-    jpeg_bytes = meta_state["jpeg_bytes"]
+    # Zero out contributions from dead streams so the meter drops immediately.
+    m_last = now - meta_state["last_seen"] if meta_state["last_seen"] else 999.0
+    m_alive = m_last < 5.0 and meta_state["active"]
+    l_last = now - lidar_state["last_seen"] if lidar_state["last_seen"] else 999.0
+    l_alive = l_last < 5.0 and lidar_state["active"]
+
+    fps = meta_state["fps"] if m_alive else 0.0
+    jpeg_bytes = meta_state["jpeg_bytes"] if m_alive else 0
+    hz = lidar_state["hz"] if l_alive else 0.0
+    num_points = lidar_state["num_points"] if l_alive else 0
+
     video_bw_kbps = (jpeg_bytes * fps) / 1000.0 if fps > 0 else 0.0
-    lidar_bw_kbps = (lidar_state["num_points"] * 12 * lidar_state["hz"]) / 1000.0
+    lidar_bw_kbps = (num_points * 12 * hz) / 1000.0
     meta_bw_kbps = (200.0 * fps) / 1000.0
     total_bw_kbps = video_bw_kbps + lidar_bw_kbps + meta_bw_kbps
 
@@ -679,6 +703,15 @@ def build_telemetry() -> dict:
 
     active_label = SIM_PROFILE_LABELS.get(active_sim_profile) if active_sim_profile else None
 
+    # When sim is active, report the proxy's measured output FPS (actual video rate
+    # the browser sees) rather than the metadata message rate (~30 fps regardless).
+    if active_sim_profile:
+        video_fps = next(
+            (p.fps for p in sim_proxies if isinstance(p, ConstrainedHTTPProxy)), 0.0
+        )
+    else:
+        video_fps = meta_state["fps"] if m_alive else 0.0
+
     return {
         "type": "telemetry",
         "timestamp": now,
@@ -686,7 +719,7 @@ def build_telemetry() -> dict:
         "active_network_profile": active_label,
         "camera": {
             "active": cam_alive,
-            "fps": meta_state["fps"] if m_alive else 0.0,
+            "fps": video_fps,
             "inference_ms": meta_state["inference_ms"],
             "frame_number": meta_state["frame_number"],
             "jpeg_bytes": meta_state["jpeg_bytes"],
@@ -763,10 +796,18 @@ async def proxy_video():
     video_port = 9090 if active_sim_profile else 8090
 
     async def stream_mjpeg():
-        try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection("127.0.0.1", video_port), timeout=3.0)
-        except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
+        # Retry loop: gives the proxy thread time to bind after a profile switch.
+        reader, writer = None, None
+        for attempt in range(10):
+            try:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection("127.0.0.1", video_port), timeout=0.5)
+                break
+            except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
+                if attempt == 9:
+                    return
+                await asyncio.sleep(0.2)
+        if writer is None:
             return
         try:
             writer.write(b"GET /stream HTTP/1.0\r\nHost: localhost\r\n\r\n")
