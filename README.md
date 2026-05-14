@@ -152,7 +152,7 @@ Stand and Crouch buttons send commands to `go2_api.py` (:8094) which executes `g
 ### Mock mode (no hardware)
 
 ```bash
-python3 ~/Desktop/dashboard_server.py --mock
+python3 ~/Desktop/src/dashboard/dashboard_server.py --mock
 ```
 
 Generates synthetic telemetry oscillating through all six network profiles — use to develop/demo without Jetson hardware.
@@ -232,20 +232,20 @@ All accept `--help` for options. All are started/stopped by `run.sh` / `stop.sh`
 
 | File | Location | Purpose |
 |------|----------|---------|
-| `inference.py` | Container | Core YOLO detection loop with thermal management, disk guards, output rotation |
-| `stream_server.py` | Container | MJPEG + TCP metadata server for remote viewing |
-| `stream_client.py` | Host | Measures video FPS, metadata rate, latency from operator side |
-| `lidar_stream.py` | Host | LD19 LiDAR serial reader, broadcasts 360-degree scans on TCP :8092 |
-| `dashboard_server.py` | Host | FastAPI + WebSocket Mission Control dashboard (v2) |
-| `sim_capture.py` | Host | MuJoCo viewer screen capture → MJPEG on :8093 |
-| `go2_api.py` | Host | Go2 control REST API wrapping SDK2 / go2_cmd.py |
-| `network_test.py` | Host | Orchestrates network degradation experiments (6 profiles, userspace proxy) |
-| `analyse_results.py` | Host | Generates 6 thesis-quality plots from experiment data |
-| `status.py` | Host | Quick terminal dashboard: container, GPU temp, disk, process status |
+| `inference.py` | Container (`/workspace`) | Core YOLO detection loop with thermal management, disk guards, output rotation |
+| `stream_server.py` | Container (`/workspace`) | MJPEG + TCP metadata server for remote viewing |
+| `src/network/stream_client.py` | Host | Measures video FPS, metadata rate, latency from operator side |
+| `src/lidar/lidar_stream.py` | Host | LD19 LiDAR serial reader, broadcasts 360-degree scans on TCP :8092 |
+| `src/dashboard/dashboard_server.py` | Host | FastAPI + WebSocket Mission Control dashboard (v2) |
+| `src/robot/sim_capture.py` | Host | MuJoCo viewer screen capture → MJPEG on :8093 |
+| `src/robot/go2_api.py` | Host | Go2 control REST API wrapping SDK2 / go2_cmd.py |
+| `src/network/network_test.py` | Host | Orchestrates network degradation experiments (6 profiles, userspace proxy) |
+| `src/network/analyse_results.py` | Host | Generates 6 thesis-quality plots from experiment data |
+| `src/robot/status.py` | Host | Quick terminal dashboard: container, GPU temp, disk, process status |
 | `run.sh` | Host | Universal launcher (inference / stream / experiment / dashboard / sim / …) |
 | `stop.sh` | Host | Kills all pipeline processes cleanly |
-| `yolo-inference.service` | systemd | Auto-starts headless inference on boot |
-| `lidar_test.py` | Host | Low-level LD19 packet decode reference |
+| `docs/yolo-inference.service` | systemd | Auto-starts headless inference on boot |
+| `src/lidar/lidar_test.py` | Host | Low-level LD19 packet decode reference |
 
 ---
 
@@ -271,10 +271,10 @@ The Tegra kernel (5.15.136-tegra) lacks `sch_netem`, so network emulation is imp
 ~/Desktop/run.sh --experiment
 
 # Quick 2-profile test
-python3 ~/Desktop/network_test.py --duration 10 --profiles 1_baseline,6_degraded_ntn
+python3 ~/Desktop/src/network/network_test.py --duration 10 --profiles 1_baseline,6_degraded_ntn
 
 # Generate plots from existing data
-python3 ~/Desktop/analyse_results.py --input network_results/full_experiment_v2/summary.csv
+python3 ~/Desktop/src/network/analyse_results.py --input network_results/full_experiment_v2/summary.csv
 
 # Live simulation from dashboard (no time limit, stop manually)
 # → Use Network Simulation buttons in the dashboard Controls panel
@@ -319,8 +319,8 @@ journalctl -u yolo-inference.service -f --since "5 min ago"
 The LD19 connects via `/dev/ttyTHS1` at 230,400 baud on the **host** (not inside Docker). Start manually or wrap in its own systemd service:
 
 ```bash
-python3 ~/Desktop/lidar_stream.py              # foreground
-python3 ~/Desktop/lidar_stream.py --log scan.csv  # with logging
+python3 ~/Desktop/src/lidar/lidar_stream.py              # foreground
+python3 ~/Desktop/src/lidar/lidar_stream.py --log scan.csv  # with logging
 ```
 
 ---
@@ -350,7 +350,7 @@ Modify `RELEVANT_CLASSES` in `inference.py` to add/remove classes.
 
 ## Requirements
 
-See [`requirements.md`](requirements.md) for formal requirements across 10 categories. See [`deployment_checklist.md`](deployment_checklist.md) for Go2 physical deployment steps.
+See [`docs/requirements.md`](docs/requirements.md) for formal requirements across 10 categories. See [`docs/deployment_checklist.md`](docs/deployment_checklist.md) for Go2 physical deployment steps.
 
 ---
 
@@ -360,9 +360,17 @@ Only source code and documentation are tracked. Models (`.pt`, `.engine`), media
 
 ```
 ~/Desktop/
-  ├── *.py, *.sh, *.md       ← tracked
-  ├── yolo-inference.service  ← tracked
+  ├── inference.py            ← tracked (Docker /workspace)
+  ├── stream_server.py        ← tracked (Docker /workspace)
+  ├── run.sh / stop.sh        ← tracked
+  ├── CLAUDE.md / README.md / architecture.svg  ← tracked
   ├── .gitignore              ← tracked
+  ├── src/
+  │   ├── dashboard/          ← tracked (dashboard_server.py)
+  │   ├── lidar/              ← tracked (lidar_stream.py, lidar_test.py)
+  │   ├── network/            ← tracked (network_test.py, stream_client.py, analyse_results.py)
+  │   └── robot/              ← tracked (go2_api.py, sim_capture.py, status.py)
+  ├── docs/                   ← tracked (requirements, deployment_checklist, yolo-inference.service)
   ├── output/                 ← gitignored (video + CSV per session)
   ├── network_results/        ← gitignored (experiment data + plots)
   ├── runs/                   ← gitignored (YOLO CLI output)
