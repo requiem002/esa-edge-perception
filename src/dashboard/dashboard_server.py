@@ -342,6 +342,7 @@ START_TIME = time.time()
 meta_state = {
     "active": False, "fps": 0.0, "inference_ms": 0.0,
     "frame_number": 0, "jpeg_bytes": 0, "last_seen": 0.0, "detections": [],
+    "frame_w": 640, "frame_h": 480,
 }
 lidar_state = {
     "active": False, "hz": 0.0, "scan_id": 0, "num_points": 0,
@@ -526,6 +527,8 @@ async def meta_reader():
                     "last_seen": time.time(),
                     "detections": msg.get("detections", []),
                     "send_timestamp":msg.get("send_timestamp", 0.0),
+                    "frame_w": msg.get("frame_w", meta_state.get("frame_w", 640)),
+                    "frame_h": msg.get("frame_h", meta_state.get("frame_h", 480)),
                 })
                 for det in msg.get("detections", []):
                     cls = det.get("class", "unknown")
@@ -637,7 +640,15 @@ async def mock_generator():
         for _ in range(n_dets):
             cls = random.choice(classes)
             conf = round(random.uniform(0.5, 0.99), 2)
-            detections.append({"class": cls, "confidence": conf})
+            cx = random.randint(80, 560)
+            cy = random.randint(60, 420)
+            bw = random.randint(40, 180)
+            bh = random.randint(50, 200)
+            detections.append({
+                "class": cls, "confidence": conf,
+                "bbox": [max(0, cx - bw // 2), max(0, cy - bh // 2),
+                         min(640, cx + bw // 2), min(480, cy + bh // 2)],
+            })
             session_totals[cls] = session_totals.get(cls, 0) + 1
 
         meta_state.update({
@@ -646,7 +657,8 @@ async def mock_generator():
             "frame_number": frame_number,
             "jpeg_bytes": random.randint(30000, 60000),
             "last_seen": now, "detections": detections,
-            "send_timestamp":now,
+            "send_timestamp": now,
+            "frame_w": 640, "frame_h": 480,
         })
 
         points = []
@@ -699,22 +711,26 @@ def build_telemetry() -> dict:
     if not args.mock:
         compute_network_metrics()
 
-    det_items = [{"class": d["class"], "confidence": d["confidence"]}
-                 for d in meta_state["detections"]]
+    det_items = [
+        {k: d[k] for k in ("class", "confidence", "bbox") if k in d}
+        for d in meta_state["detections"]
+    ]
     det_classes: dict = {}
     for d in det_items:
         det_classes[d["class"]] = det_classes.get(d["class"], 0) + 1
 
     active_label = SIM_PROFILE_LABELS.get(active_sim_profile) if active_sim_profile else None
 
-    # When sim is active, report the proxy's measured output FPS (actual video rate
-    # the browser sees) rather than the metadata message rate (~30 fps regardless).
+    # meta_fps: raw metadata delivery rate (always ~30; survives degraded links
+    # because metadata messages are tiny). video_fps: actual video frame rate
+    # the browser sees (throttled by proxy when sim is active).
+    meta_fps = meta_state["fps"] if m_alive else 0.0
     if active_sim_profile:
         video_fps = next(
             (p.fps for p in sim_proxies if isinstance(p, ConstrainedHTTPProxy)), 0.0
         )
     else:
-        video_fps = meta_state["fps"] if m_alive else 0.0
+        video_fps = meta_fps
 
     return {
         "type": "telemetry",
@@ -724,11 +740,14 @@ def build_telemetry() -> dict:
         "camera": {
             "active": cam_alive,
             "fps": video_fps,
+            "meta_fps": meta_fps,
             "inference_ms": meta_state["inference_ms"],
             "frame_number": meta_state["frame_number"],
             "jpeg_bytes": meta_state["jpeg_bytes"],
             "last_seen_s": round(m_last, 2),
             "send_timestamp": meta_state.get("send_timestamp", 0.0),
+            "frame_w": meta_state.get("frame_w", 640),
+            "frame_h": meta_state.get("frame_h", 480),
         },
         "detections": {"count": len(det_items), "classes": det_classes, "items": det_items},
         "lidar": {
@@ -1191,6 +1210,31 @@ body::after{
 .dconf{color:var(--txtd);width:30px;font-size:.60rem;}
 .sdiv{border-top:1px solid var(--bdr);margin:5px 0 3px;color:var(--txtd);font-size:.55rem;letter-spacing:.08em;padding-top:3px;}
 .sitem{display:flex;justify-content:space-between;color:var(--txtd);font-size:.60rem;margin-bottom:1px;}
+/* AI Situational Awareness */
+#pAiSa{flex:2.5;}
+#aiWrap{flex:1;position:relative;background:#0d0f0e;overflow:hidden;min-height:0;}
+#aiCanvas{width:100%;height:100%;display:block;}
+#aiOffline{
+  display:none;position:absolute;top:0;left:0;right:0;bottom:0;
+  background:#0d0f0e;align-items:center;justify-content:center;
+  color:var(--amb);font-size:.80rem;letter-spacing:.18em;
+}
+#aiTicker{
+  flex-shrink:0;height:90px;overflow:hidden;padding:3px 6px;
+  border-top:1px solid var(--bdr);font-size:.55rem;
+}
+.aiTick{opacity:0;animation:tickIn .3s forwards;margin-bottom:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+@keyframes tickIn{to{opacity:1;}}
+.aiTick .ts{color:var(--txtd);}
+.aiTick .cnt{color:var(--grn);}
+#aiRate{
+  flex-shrink:0;display:flex;gap:6px;padding:4px 6px;border-top:1px solid var(--bdr);
+  font-size:.55rem;color:var(--txtd);letter-spacing:.06em;
+}
+.aiBar{flex:1;display:flex;flex-direction:column;gap:1px;}
+.aiBarLbl{display:flex;justify-content:space-between;}
+.aiBarTrack{height:6px;background:#111;border:1px solid var(--bdr);overflow:hidden;}
+.aiBarFill{height:100%;transition:width .3s;}
 /* Network panel */
 #pNet{flex:4;}
 #pNet .pb{flex-direction:row;padding:0;align-items:stretch;}
@@ -1410,6 +1454,25 @@ body.degraded #degradedBar{display:flex;}
       </div>
     </div>
 
+    <!-- H: AI Situational Awareness -->
+    <div class="panel" id="pAiSa">
+      <div class="ph">[ &#9672; AI SITUATIONAL AWARENESS ]</div>
+      <div class="pb">
+        <div id="aiWrap"><canvas id="aiCanvas"></canvas><div id="aiOffline">AI STREAM OFFLINE</div></div>
+        <div id="aiTicker"></div>
+        <div id="aiRate">
+          <div class="aiBar">
+            <div class="aiBarLbl"><span>VIDEO</span><span id="aiVidFps">0.0 fps</span></div>
+            <div class="aiBarTrack"><div class="aiBarFill" id="aiVidBar" style="width:0%;background:var(--red);"></div></div>
+          </div>
+          <div class="aiBar">
+            <div class="aiBarLbl"><span>AI META</span><span id="aiMetFps">0.0 fps</span></div>
+            <div class="aiBarTrack"><div class="aiBarFill" id="aiMetBar" style="width:0%;background:var(--grn);"></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- F: Network Analytics -->
     <div class="panel" id="pNet">
       <div class="ph">[ &#9672; NETWORK ANALYTICS ]</div>
@@ -1565,6 +1628,9 @@ function handleTelemetry(d) {
   document.getElementById('dFrame').textContent=String(cam.frame_number).padStart(5,'0');
   renderDets(det.items);
   if (d.session_totals) renderSession(d.session_totals);
+
+  // AI Situational Awareness panel
+  updateAiSa(det, cam);
 
   // LiDAR
   latestLidar=lidar;
@@ -2163,6 +2229,90 @@ tick();setInterval(tick,1000);
 // ── Resize tier chart on panel resize ────────────────────────────────────────
 if(window.ResizeObserver){
   new ResizeObserver(drawTierChart).observe(document.getElementById('pNet'));
+}
+
+// ── AI Situational Awareness ─────────────────────────────────────────────────
+const aiCanvas = document.getElementById('aiCanvas');
+const aiCtx = aiCanvas.getContext('2d');
+const aiTicker = document.getElementById('aiTicker');
+const aiTickerItems = [];
+let aiLastTs = 0;
+
+function resizeAiCanvas() {
+  const wrap = document.getElementById('aiWrap');
+  if (!wrap) return;
+  aiCanvas.width = wrap.clientWidth;
+  aiCanvas.height = wrap.clientHeight;
+}
+resizeAiCanvas();
+if (window.ResizeObserver) {
+  new ResizeObserver(resizeAiCanvas).observe(document.getElementById('aiWrap'));
+}
+
+function updateAiSa(det, cam) {
+  const offline = cam.last_seen_s > 2;
+  document.getElementById('aiOffline').style.display = offline ? 'flex' : 'none';
+  aiCanvas.style.display = offline ? 'none' : 'block';
+
+  // Draw bounding boxes
+  const ctx = aiCtx;
+  const cw = aiCanvas.width, ch = aiCanvas.height;
+  if (cw === 0 || ch === 0) return;
+  ctx.clearRect(0, 0, cw, ch);
+
+  const fw = cam.frame_w || 640, fh = cam.frame_h || 480;
+  const sx = cw / fw, sy = ch / fh;
+
+  for (const d of (det.items || [])) {
+    if (!d.bbox) continue;
+    const [x1, y1, x2, y2] = d.bbox;
+    const conf = d.confidence;
+    const col = conf > 0.8 ? '#00ff88' : conf > 0.5 ? '#ffaa00' : '#ff3333';
+
+    const rx = x1 * sx, ry = y1 * sy, rw = (x2 - x1) * sx, rh = (y2 - y1) * sy;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(rx, ry, rw, rh);
+
+    // Label background
+    const label = d.class + ' ' + Math.round(conf * 100) + '%';
+    ctx.font = '11px "JetBrains Mono", monospace';
+    const tw = ctx.measureText(label).width;
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(rx, ry - 15, tw + 6, 15);
+    ctx.fillStyle = col;
+    ctx.fillText(label, rx + 3, ry - 3);
+  }
+
+  // Ticker
+  if (det.count > 0) {
+    const now = Date.now();
+    const delta = aiLastTs ? ((now - aiLastTs) / 1000).toFixed(2) : '0.00';
+    aiLastTs = now;
+    const descs = (det.items || []).map(d => {
+      const col = d.confidence > 0.8 ? '#00ff88' : d.confidence > 0.5 ? '#ffaa00' : '#ff3333';
+      return '<span style="color:' + col + '">' + d.class + ' (' + Math.round(d.confidence * 100) + '%)</span>';
+    }).join(', ');
+    const entry = '<div class="aiTick"><span class="ts">[+' + delta + 's]</span> '
+      + '<span class="cnt">' + det.count + ' obj</span>: ' + descs + '</div>';
+    aiTickerItems.unshift(entry);
+    if (aiTickerItems.length > 8) aiTickerItems.length = 8;
+    aiTicker.innerHTML = aiTickerItems.join('');
+  }
+
+  // Stream rate comparison bars
+  const vFps = cam.fps || 0;
+  const mFps = cam.meta_fps || 0;
+  const vPct = Math.min(100, (vFps / 30) * 100);
+  const mPct = Math.min(100, (mFps / 30) * 100);
+  document.getElementById('aiVidFps').textContent = vFps.toFixed(1) + ' fps';
+  document.getElementById('aiMetFps').textContent = mFps.toFixed(1) + ' fps';
+  const vBar = document.getElementById('aiVidBar');
+  const mBar = document.getElementById('aiMetBar');
+  vBar.style.width = vPct + '%';
+  mBar.style.width = mPct + '%';
+  vBar.style.background = vPct < 30 ? 'var(--red)' : vPct < 60 ? 'var(--amb)' : 'var(--grn)';
+  mBar.style.background = mPct < 30 ? 'var(--red)' : mPct < 60 ? 'var(--amb)' : 'var(--grn)';
 }
 </script>
 
