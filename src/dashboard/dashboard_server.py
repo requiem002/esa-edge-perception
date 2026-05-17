@@ -353,7 +353,7 @@ active_meta_port: int = args.meta_port
 active_lidar_port: int = args.lidar_port
 active_sim_profile: Optional[str] = None
 sim_proxies: list = []
-camera_port_alive: bool = False
+_video_reconnect_token: int = 0  # incremented on profile change to force /video reconnect
 meta_reader_task: Optional[asyncio.Task] = None
 lidar_reader_task: Optional[asyncio.Task] = None
 go2_api_proc = None
@@ -398,12 +398,6 @@ async def gpu_temp_poller():
         system_state_hw["gpu_temp_c"] = t
         system_state_hw["gpu_status"] = gpu_status_label(t)
         await asyncio.sleep(2)
-
-async def camera_port_poller():
-    global camera_port_alive
-    while True:
-        camera_port_alive = await _port_open("127.0.0.1", 8090)
-        await asyncio.sleep(2.0)
 
 # ─── FPS/Hz Sliding Window ────────────────────────────────────────────────────
 
@@ -685,11 +679,13 @@ def build_telemetry() -> dict:
     l_last = now - lidar_state["last_seen"] if lidar_state["last_seen"] else 999.0
 
     # Track each stream independently:
-    #   cam_alive  — camera MJPEG port 8090 is TCP-connectable
+    #   cam_alive  — derived from metadata: camera is alive when metadata flows
+    #                (TCP probe on 8090 was removed — the MJPEG HTTPServer's tiny
+    #                 backlog fills up under probe load, starving real connections)
     #   m_alive    — metadata stream on port 8091 is delivering frames
     #   l_alive    — LiDAR stream on port 8092 is delivering scans
-    cam_alive = True if args.mock else camera_port_alive
     m_alive = m_last < 5.0 and meta_state["active"]
+    cam_alive = True if args.mock else m_alive
     l_alive = l_last < 5.0 and lidar_state["active"]
 
     n_alive = sum([cam_alive, m_alive, l_alive])
@@ -798,50 +794,65 @@ async def health():
 
 @app.get("/video")
 async def proxy_video():
-    """MJPEG proxy. Routes through ConstrainedHTTPProxy on 9090 when sim is active,
-    otherwise connects directly to stream_server on 8090. Both live on 127.0.0.1 so
-    this endpoint is always reachable regardless of where the browser is."""
-    video_port = 9090 if active_sim_profile else 8090
+    """MJPEG proxy with persistent reconnect. Routes through ConstrainedHTTPProxy
+    on 9090 when sim is active, otherwise connects directly to stream_server on
+    8090. Outer loop reconnects on any mid-stream drop so the browser never sees
+    a permanent EOF while the upstream is healthy."""
 
     async def stream_mjpeg():
-        # Retry loop: gives the proxy thread time to bind after a profile switch.
-        reader, writer = None, None
-        for attempt in range(10):
-            try:
-                reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection("127.0.0.1", video_port), timeout=0.5)
-                break
-            except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
-                if attempt == 9:
-                    return
-                await asyncio.sleep(0.2)
-        if writer is None:
-            return
-        try:
-            writer.write(b"GET /stream HTTP/1.0\r\nHost: localhost\r\n\r\n")
-            await writer.drain()
-            header_buf = b""
-            while b"\r\n\r\n" not in header_buf:
-                chunk = await asyncio.wait_for(reader.read(512), timeout=5.0)
-                if not chunk:
-                    return
-                header_buf += chunk
-            sep = header_buf.find(b"\r\n\r\n") + 4
-            if sep < len(header_buf):
-                yield header_buf[sep:]
-            while True:
-                chunk = await asyncio.wait_for(reader.read(8192), timeout=10.0)
-                if not chunk:
+        while True:  # persistent reconnect — exits only when browser disconnects
+            video_port = 9090 if active_sim_profile else 8090
+            token = _video_reconnect_token  # snapshot; break if profile changes
+            writer = None
+            # Inner retry loop: allows proxy thread time to bind after profile switch.
+            for attempt in range(10):
+                try:
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection("127.0.0.1", video_port), timeout=0.5)
                     break
-                yield chunk
-        except (asyncio.TimeoutError, ConnectionResetError, OSError):
-            pass
-        finally:
+                except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
+                    if attempt == 9:
+                        break
+                    await asyncio.sleep(0.2)
+            if writer is None:
+                # Upstream not ready — pause before outer retry.
+                await asyncio.sleep(1.0)
+                continue
             try:
-                writer.close()
-                await writer.wait_closed()
-            except Exception:
+                writer.write(b"GET /stream HTTP/1.0\r\nHost: localhost\r\n\r\n")
+                await writer.drain()
+                # Read upstream HTTP response headers.
+                header_buf = b""
+                while b"\r\n\r\n" not in header_buf:
+                    chunk = await asyncio.wait_for(reader.read(512), timeout=5.0)
+                    if not chunk:
+                        break
+                    header_buf += chunk
+                if b"\r\n\r\n" not in header_buf:
+                    # Incomplete headers — upstream closed early.
+                    await asyncio.sleep(1.0)
+                    continue
+                sep = header_buf.find(b"\r\n\r\n") + 4
+                if sep < len(header_buf):
+                    yield header_buf[sep:]
+                # Stream body until connection drops or profile changes.
+                while True:
+                    if _video_reconnect_token != token:
+                        break  # sim profile changed — reconnect to new port
+                    chunk = await asyncio.wait_for(reader.read(8192), timeout=10.0)
+                    if not chunk:
+                        break
+                    yield chunk
+            except (asyncio.TimeoutError, ConnectionResetError, OSError):
                 pass
+            finally:
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+            # Brief pause before reconnect to avoid tight loop on persistent failure.
+            await asyncio.sleep(0.5)
 
     return StreamingResponse(stream_mjpeg(), media_type="multipart/x-mixed-replace; boundary=frame")
 
@@ -911,7 +922,7 @@ async def logging_stop():
 
 @app.post("/control/network/start/{profile}")
 async def network_sim_start(profile: str):
-    global active_sim_profile, sim_proxies, active_meta_port, active_lidar_port
+    global active_sim_profile, sim_proxies, active_meta_port, active_lidar_port, _video_reconnect_token
     if profile not in SIM_PROFILE_MAP:
         return JSONResponse({"ok": False, "error": f"Unknown profile: {profile}"}, status_code=400)
 
@@ -931,6 +942,7 @@ async def network_sim_start(profile: str):
     active_sim_profile = profile
     active_meta_port = 9091
     active_lidar_port = 9092
+    _video_reconnect_token += 1  # signal /video to reconnect via proxy
 
     if not args.mock:
         await restart_stream_readers()
@@ -939,13 +951,14 @@ async def network_sim_start(profile: str):
 
 @app.post("/control/network/stop")
 async def network_sim_stop():
-    global active_sim_profile, sim_proxies, active_meta_port, active_lidar_port
+    global active_sim_profile, sim_proxies, active_meta_port, active_lidar_port, _video_reconnect_token
     for p in sim_proxies:
         p.stop()
     sim_proxies.clear()
     active_sim_profile = None
     active_meta_port = args.meta_port
     active_lidar_port = args.lidar_port
+    _video_reconnect_token += 1  # signal /video to reconnect directly to 8090
     if not args.mock:
         await restart_stream_readers()
     return {"ok": True}
@@ -1027,7 +1040,6 @@ async def startup():
         meta_reader_task = asyncio.create_task(meta_reader())
         lidar_reader_task = asyncio.create_task(lidar_reader())
         asyncio.create_task(gpu_temp_poller())
-        asyncio.create_task(camera_port_poller())
     asyncio.create_task(telemetry_broadcaster())
     print(f"[dashboard] Serving at http://{args.host}:{args.port}")
 
