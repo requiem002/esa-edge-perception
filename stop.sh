@@ -65,4 +65,4 @@ done
 
 echo
 echo "[stop.sh] Status:"
-python3 "${DESKTOP}/status.py" || true
+python3 "${DESKTOP}/src/robot/status.py" || true

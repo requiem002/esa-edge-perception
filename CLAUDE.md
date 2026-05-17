@@ -64,6 +64,26 @@ yolo predict model=yolo26n.pt source=bus.jpg          # image
 - `best2.pt`, `best2.onnx`, `best2.engine` — second broken variant
 - `runs/detect/` — inference outputs (images, `.avi` video)
 
+## Project layout
+
+```
+~/Desktop/
+  ├── inference.py          ← YOLO inference (runs inside Docker at /workspace)
+  ├── stream_server.py      ← MJPEG+metadata server (runs inside Docker at /workspace)
+  ├── run.sh / stop.sh      ← universal launcher / stopper
+  ├── CLAUDE.md / README.md / architecture.svg
+  ├── src/
+  │   ├── dashboard/        ← dashboard_server.py  (FastAPI Mission Control)
+  │   ├── lidar/            ← lidar_stream.py, lidar_test.py
+  │   ├── network/          ← network_test.py, stream_client.py, analyse_results.py
+  │   └── robot/            ← go2_api.py, sim_capture.py, status.py
+  └── docs/
+      ├── requirements.md / requirements.xlsx
+      ├── dashboard_requirements.md / dashboard_v2_requirements.md
+      ├── deployment_checklist.md
+      └── yolo-inference.service
+```
+
 ## TensorRT Samples
 
 Reference Python scripts for manual ONNX→TensorRT conversion at:
@@ -80,7 +100,7 @@ The Unitree MuJoCo simulator lives at `~/unitree_mujoco/` on the host (not insid
 - **SDK**: `~/unitree_sdk2/` (C++) and `~/unitree_sdk2_python/` (Python bindings)
 - **Bridge scripts**: `~/unitree_mujoco/go2_bridge/` — control examples using SDK2
 
-The simulator does **not** currently have camera rendering. Integrating camera output with the YOLO pipeline requires adding MuJoCo offscreen rendering (see `requirements.md` SIM-1 through SIM-3).
+The simulator does **not** currently have camera rendering. Integrating camera output with the YOLO pipeline requires adding MuJoCo offscreen rendering (see `docs/requirements.md` SIM-1 through SIM-3).
 
 ## Related workspaces
 The Unitree simulator and OpenClaw agentic framework live in ~/esa_jetson/.
@@ -93,7 +113,7 @@ OpenClaw (`~/.openclaw/`) is an agentic framework running on the Jetson. It has 
 
 ## Requirements
 
-`requirements.md` on the Desktop contains formal, numbered requirements for the CV pipeline covering detection, thermal management, network resilience, camera fault tolerance, logging, latency, and robot integration. (Note: the canonical copy is `requirements.xlsx` — the `.md` mirror may not exist on disk.)
+`docs/requirements.md` contains formal, numbered requirements for the CV pipeline covering detection, thermal management, network resilience, camera fault tolerance, logging, latency, and robot integration. (The canonical copy is `docs/requirements.xlsx`.)
 
 ## Git repository
 
@@ -109,8 +129,8 @@ Commit and push as the regular user — `~/Desktop/.git` is owned by the user, n
 ## LIDAR (LD19 / LDLidar)
 
 - Connected to the **host** at `/dev/ttyTHS1` at 230 400 baud (NOT inside Docker).
-- Reference: `lidar_test.py` (raw packet decode example).
-- Streamer: `lidar_stream.py` — reads LD19 packets, assembles full 360° scans (~10 Hz, ~300–450 points/scan), broadcasts each scan as length-prefixed JSON over TCP port **8092**.
+- Reference: `src/lidar/lidar_test.py` (raw packet decode example).
+- Streamer: `src/lidar/lidar_stream.py` — reads LD19 packets, assembles full 360° scans (~10 Hz, ~300–450 points/scan), broadcasts each scan as length-prefixed JSON over TCP port **8092**.
 - LD19 packet layout: `0x54 0x2C` header + 45 data bytes (12 distance/confidence triplets between `start_angle` and `end_angle`).
 
 ## Network degradation experiment
@@ -119,11 +139,11 @@ Three-stream perception pipeline measured over emulated 5G/NTN links (the Tegra 
 
 | Component        | Where        | Port |
 |------------------|--------------|------|
-| `stream_server.py` (MJPEG + YOLO) | inside `yolo-saad` | 8090 (video), 8091 (meta) |
-| `lidar_stream.py`                 | host             | 8092 (lidar) |
-| `stream_client.py`                | host             | connects via proxies on 9090/9091/9092 |
-| `network_test.py`                 | host             | orchestrator (6 profiles, --repeats N) |
-| `analyse_results.py`              | host             | plots + thesis table |
+| `stream_server.py` (MJPEG + YOLO)    | inside `yolo-saad` | 8090 (video), 8091 (meta) |
+| `src/lidar/lidar_stream.py`          | host             | 8092 (lidar) |
+| `src/network/stream_client.py`       | host             | connects via proxies on 9090/9091/9092 |
+| `src/network/network_test.py`        | host             | orchestrator (6 profiles, --repeats N) |
+| `src/network/analyse_results.py`     | host             | plots + thesis table |
 
 Runtime artefacts (all in `network_results/`, all gitignored):
 - `summary.csv` — per-profile means + stddevs
@@ -141,18 +161,18 @@ To reproduce:
 # 1. Start servers
 docker exec -d yolo-saad python3 /workspace/stream_server.py \
     --log /workspace/network_results/full_experiment_v2/server_log.csv
-nohup python3 ~/Desktop/lidar_stream.py \
+nohup python3 ~/Desktop/src/lidar/lidar_stream.py \
     --log ~/Desktop/network_results/full_experiment_v2/lidar_server_log.csv \
     > /tmp/lidar_stream.log 2>&1 &
 
 # 2. Run experiment
-python3 ~/Desktop/network_test.py \
+python3 ~/Desktop/src/network/network_test.py \
     --duration 60 --repeats 3 \
     --output-dir network_results/full_experiment_v2
 
 # 3. Generate plots and thesis table
-python3 ~/Desktop/analyse_results.py \
+python3 ~/Desktop/src/network/analyse_results.py \
     --input network_results/full_experiment_v2/summary.csv
 ```
 
-If the LIDAR isn't connected, `network_test.py` automatically detects that port 8092 is unreachable and runs camera-only.
+If the LIDAR isn't connected, `src/network/network_test.py` automatically detects that port 8092 is unreachable and runs camera-only.

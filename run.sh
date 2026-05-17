@@ -108,7 +108,7 @@ case "${MODE}" in
 
     # ── Status dashboard ─────────────────────────────────────────────
     status)
-        exec python3 "${DESKTOP}/status.py"
+        exec python3 "${DESKTOP}/src/robot/status.py"
         ;;
 
     # ── Full network degradation experiment ──────────────────────────
@@ -131,7 +131,7 @@ case "${MODE}" in
 
         if [[ -e /dev/ttyTHS1 ]]; then
             echo "[run.sh] Starting lidar_stream.py on host..."
-            nohup python3 "${DESKTOP}/lidar_stream.py" \
+            nohup python3 "${DESKTOP}/src/lidar/lidar_stream.py" \
                 --log "${LIDAR_LOG}" \
                 > "${OUT_DIR}/lidar_stream.log" 2>&1 &
         else
@@ -143,7 +143,7 @@ case "${MODE}" in
         sleep 8
 
         echo "[run.sh] Running network_test.py..."
-        python3 "${DESKTOP}/network_test.py" \
+        python3 "${DESKTOP}/src/network/network_test.py" \
             --duration 60 --repeats 3 \
             --output-dir "${OUT_DIR}"
 
@@ -152,7 +152,7 @@ case "${MODE}" in
         pkill -f lidar_stream.py 2>/dev/null || true
 
         echo "[run.sh] Generating plots..."
-        python3 "${DESKTOP}/analyse_results.py" \
+        python3 "${DESKTOP}/src/network/analyse_results.py" \
             --input "${OUT_DIR}/summary.csv"
 
         echo
@@ -163,7 +163,7 @@ case "${MODE}" in
     dashboard)
         echo "[run.sh] Starting mission control dashboard on :8080..."
         pip3 install -q fastapi uvicorn wsproto 2>/dev/null
-        nohup python3 "${DESKTOP}/dashboard_server.py" \
+        nohup python3 "${DESKTOP}/src/dashboard/dashboard_server.py" \
             > "${DESKTOP}/dashboard.log" 2>&1 &
         echo $! > /tmp/dashboard.pid
         sleep 1
@@ -175,7 +175,7 @@ case "${MODE}" in
     sim-capture)
         export DISPLAY="${DISPLAY:-:1}"
         echo "[run.sh] Starting MuJoCo screen capture on :8093..."
-        DISPLAY="${DISPLAY}" nohup python3 "${DESKTOP}/sim_capture.py" \
+        DISPLAY="${DISPLAY}" nohup python3 "${DESKTOP}/src/robot/sim_capture.py" \
             > /tmp/sim_capture.log 2>&1 &
         echo $! > /tmp/sim_capture.pid
         sleep 1
@@ -230,7 +230,7 @@ case "${MODE}" in
     go2-api)
         TARGET="${INFERENCE_EXTRA[0]:-sim}"
         echo "[run.sh] Starting Go2 control API on :8094 (target: ${TARGET})..."
-        nohup python3 "${DESKTOP}/go2_api.py" \
+        nohup python3 "${DESKTOP}/src/robot/go2_api.py" \
             --target "${TARGET}" \
             > /tmp/go2_api.log 2>&1 &
         echo $! > /tmp/go2_api.pid
@@ -264,12 +264,12 @@ case "${MODE}" in
         read -p "  Press Enter once the MuJoCo viewer window is open... "
         echo
         echo "[run.sh] Starting MuJoCo screen capture on :8093..."
-        DISPLAY="${DISPLAY:-:1}" nohup python3 "${DESKTOP}/sim_capture.py" \
+        DISPLAY="${DISPLAY:-:1}" nohup python3 "${DESKTOP}/src/robot/sim_capture.py" \
             > /tmp/sim_capture.log 2>&1 &
         echo $! > /tmp/sim_capture.pid
         sleep 2
         echo "[run.sh] Starting Go2 control API on :8094 (target: sim)..."
-        nohup python3 "${DESKTOP}/go2_api.py" \
+        nohup python3 "${DESKTOP}/src/robot/go2_api.py" \
             --target sim \
             > /tmp/go2_api.log 2>&1 &
         echo $! > /tmp/go2_api.pid

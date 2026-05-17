@@ -326,6 +326,8 @@ def main():
             "detections": detections,
             "fps": round(fps_smooth, 1),
             "jpeg_bytes": len(jpeg_buf),
+            "frame_w": w,
+            "frame_h": h,
         })
 
         # Publish to shared state

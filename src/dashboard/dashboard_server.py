@@ -149,6 +149,7 @@ class ConstrainedHTTPProxy:
         self._thread = None
         self.frames_forwarded = 0
         self.frames_dropped = 0
+        self._frame_times: deque = deque()  # timestamps of forwarded frames for fps calc
 
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -160,6 +161,19 @@ class ConstrainedHTTPProxy:
             self._server.close()
         if self._thread:
             self._thread.join(timeout=3)
+
+    @property
+    def fps(self) -> float:
+        ft = self._frame_times
+        try:
+            if len(ft) < 2:
+                return 0.0
+            span = ft[-1] - ft[0]
+            return (len(ft) - 1) / span if span > 0 else 0.0
+        except (IndexError, ZeroDivisionError):
+            # Deque can shrink between len() check and index access (GIL is not
+            # held across the pair of operations) — return 0 rather than crash.
+            return 0.0
 
     def _run(self):
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -233,7 +247,10 @@ class ConstrainedHTTPProxy:
                     if not stripped:
                         break  # blank line = end of part headers
                     if stripped.lower().startswith(b"content-length:"):
-                        content_length = int(stripped.split(b":", 1)[1].strip())
+                        try:
+                            content_length = int(stripped.split(b":", 1)[1].strip())
+                        except (ValueError, IndexError):
+                            pass
 
                 if content_length is None:
                     continue  # can't read frame without knowing its size
@@ -267,6 +284,12 @@ class ConstrainedHTTPProxy:
                 )
                 client_conn.sendall(out)
                 self.frames_forwarded += 1
+                # Record frame time for fps calculation (5-second sliding window)
+                t = time.time()
+                self._frame_times.append(t)
+                cutoff = t - 5.0
+                while self._frame_times and self._frame_times[0] < cutoff:
+                    self._frame_times.popleft()
 
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
@@ -319,6 +342,7 @@ START_TIME = time.time()
 meta_state = {
     "active": False, "fps": 0.0, "inference_ms": 0.0,
     "frame_number": 0, "jpeg_bytes": 0, "last_seen": 0.0, "detections": [],
+    "frame_w": 640, "frame_h": 480,
 }
 lidar_state = {
     "active": False, "hz": 0.0, "scan_id": 0, "num_points": 0,
@@ -330,7 +354,7 @@ active_meta_port: int = args.meta_port
 active_lidar_port: int = args.lidar_port
 active_sim_profile: Optional[str] = None
 sim_proxies: list = []
-camera_port_alive: bool = False
+_video_reconnect_token: int = 0  # incremented on profile change to force /video reconnect
 meta_reader_task: Optional[asyncio.Task] = None
 lidar_reader_task: Optional[asyncio.Task] = None
 go2_api_proc = None
@@ -375,12 +399,6 @@ async def gpu_temp_poller():
         system_state_hw["gpu_temp_c"] = t
         system_state_hw["gpu_status"] = gpu_status_label(t)
         await asyncio.sleep(2)
-
-async def camera_port_poller():
-    global camera_port_alive
-    while True:
-        camera_port_alive = await _port_open("127.0.0.1", 8090)
-        await asyncio.sleep(2.0)
 
 # ─── FPS/Hz Sliding Window ────────────────────────────────────────────────────
 
@@ -436,10 +454,19 @@ def compute_network_metrics():
     while lidar_bw_window and lidar_bw_window[0][0] < cutoff:
         lidar_bw_window.popleft()
 
-    fps = meta_state["fps"]
-    jpeg_bytes = meta_state["jpeg_bytes"]
+    # Zero out contributions from dead streams so the meter drops immediately.
+    m_last = now - meta_state["last_seen"] if meta_state["last_seen"] else 999.0
+    m_alive = m_last < 5.0 and meta_state["active"]
+    l_last = now - lidar_state["last_seen"] if lidar_state["last_seen"] else 999.0
+    l_alive = l_last < 5.0 and lidar_state["active"]
+
+    fps = meta_state["fps"] if m_alive else 0.0
+    jpeg_bytes = meta_state["jpeg_bytes"] if m_alive else 0
+    hz = lidar_state["hz"] if l_alive else 0.0
+    num_points = lidar_state["num_points"] if l_alive else 0
+
     video_bw_kbps = (jpeg_bytes * fps) / 1000.0 if fps > 0 else 0.0
-    lidar_bw_kbps = (lidar_state["num_points"] * 12 * lidar_state["hz"]) / 1000.0
+    lidar_bw_kbps = (num_points * 12 * hz) / 1000.0
     meta_bw_kbps = (200.0 * fps) / 1000.0
     total_bw_kbps = video_bw_kbps + lidar_bw_kbps + meta_bw_kbps
 
@@ -500,6 +527,8 @@ async def meta_reader():
                     "last_seen": time.time(),
                     "detections": msg.get("detections", []),
                     "send_timestamp":msg.get("send_timestamp", 0.0),
+                    "frame_w": msg.get("frame_w", meta_state.get("frame_w", 640)),
+                    "frame_h": msg.get("frame_h", meta_state.get("frame_h", 480)),
                 })
                 for det in msg.get("detections", []):
                     cls = det.get("class", "unknown")
@@ -611,7 +640,15 @@ async def mock_generator():
         for _ in range(n_dets):
             cls = random.choice(classes)
             conf = round(random.uniform(0.5, 0.99), 2)
-            detections.append({"class": cls, "confidence": conf})
+            cx = random.randint(80, 560)
+            cy = random.randint(60, 420)
+            bw = random.randint(40, 180)
+            bh = random.randint(50, 200)
+            detections.append({
+                "class": cls, "confidence": conf,
+                "bbox": [max(0, cx - bw // 2), max(0, cy - bh // 2),
+                         min(640, cx + bw // 2), min(480, cy + bh // 2)],
+            })
             session_totals[cls] = session_totals.get(cls, 0) + 1
 
         meta_state.update({
@@ -620,7 +657,8 @@ async def mock_generator():
             "frame_number": frame_number,
             "jpeg_bytes": random.randint(30000, 60000),
             "last_seen": now, "detections": detections,
-            "send_timestamp":now,
+            "send_timestamp": now,
+            "frame_w": 640, "frame_h": 480,
         })
 
         points = []
@@ -653,11 +691,13 @@ def build_telemetry() -> dict:
     l_last = now - lidar_state["last_seen"] if lidar_state["last_seen"] else 999.0
 
     # Track each stream independently:
-    #   cam_alive  — camera MJPEG port 8090 is TCP-connectable
+    #   cam_alive  — derived from metadata: camera is alive when metadata flows
+    #                (TCP probe on 8090 was removed — the MJPEG HTTPServer's tiny
+    #                 backlog fills up under probe load, starving real connections)
     #   m_alive    — metadata stream on port 8091 is delivering frames
     #   l_alive    — LiDAR stream on port 8092 is delivering scans
-    cam_alive = True if args.mock else camera_port_alive
     m_alive = m_last < 5.0 and meta_state["active"]
+    cam_alive = True if args.mock else m_alive
     l_alive = l_last < 5.0 and lidar_state["active"]
 
     n_alive = sum([cam_alive, m_alive, l_alive])
@@ -671,13 +711,26 @@ def build_telemetry() -> dict:
     if not args.mock:
         compute_network_metrics()
 
-    det_items = [{"class": d["class"], "confidence": d["confidence"]}
-                 for d in meta_state["detections"]]
+    det_items = [
+        {k: d[k] for k in ("class", "confidence", "bbox") if k in d}
+        for d in meta_state["detections"]
+    ]
     det_classes: dict = {}
     for d in det_items:
         det_classes[d["class"]] = det_classes.get(d["class"], 0) + 1
 
     active_label = SIM_PROFILE_LABELS.get(active_sim_profile) if active_sim_profile else None
+
+    # meta_fps: raw metadata delivery rate (always ~30; survives degraded links
+    # because metadata messages are tiny). video_fps: actual video frame rate
+    # the browser sees (throttled by proxy when sim is active).
+    meta_fps = meta_state["fps"] if m_alive else 0.0
+    if active_sim_profile:
+        video_fps = next(
+            (p.fps for p in sim_proxies if isinstance(p, ConstrainedHTTPProxy)), 0.0
+        )
+    else:
+        video_fps = meta_fps
 
     return {
         "type": "telemetry",
@@ -686,12 +739,15 @@ def build_telemetry() -> dict:
         "active_network_profile": active_label,
         "camera": {
             "active": cam_alive,
-            "fps": meta_state["fps"] if m_alive else 0.0,
+            "fps": video_fps,
+            "meta_fps": meta_fps,
             "inference_ms": meta_state["inference_ms"],
             "frame_number": meta_state["frame_number"],
             "jpeg_bytes": meta_state["jpeg_bytes"],
             "last_seen_s": round(m_last, 2),
             "send_timestamp": meta_state.get("send_timestamp", 0.0),
+            "frame_w": meta_state.get("frame_w", 640),
+            "frame_h": meta_state.get("frame_h", 480),
         },
         "detections": {"count": len(det_items), "classes": det_classes, "items": det_items},
         "lidar": {
@@ -757,38 +813,65 @@ async def health():
 
 @app.get("/video")
 async def proxy_video():
-    """Low-latency MJPEG proxy using raw asyncio sockets."""
+    """MJPEG proxy with persistent reconnect. Routes through ConstrainedHTTPProxy
+    on 9090 when sim is active, otherwise connects directly to stream_server on
+    8090. Outer loop reconnects on any mid-stream drop so the browser never sees
+    a permanent EOF while the upstream is healthy."""
+
     async def stream_mjpeg():
-        try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection("127.0.0.1", 8090), timeout=3.0)
-        except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
-            return
-        try:
-            writer.write(b"GET /stream HTTP/1.0\r\nHost: localhost\r\n\r\n")
-            await writer.drain()
-            header_buf = b""
-            while b"\r\n\r\n" not in header_buf:
-                chunk = await asyncio.wait_for(reader.read(512), timeout=5.0)
-                if not chunk:
-                    return
-                header_buf += chunk
-            sep = header_buf.find(b"\r\n\r\n") + 4
-            if sep < len(header_buf):
-                yield header_buf[sep:]
-            while True:
-                chunk = await asyncio.wait_for(reader.read(8192), timeout=10.0)
-                if not chunk:
+        while True:  # persistent reconnect — exits only when browser disconnects
+            video_port = 9090 if active_sim_profile else 8090
+            token = _video_reconnect_token  # snapshot; break if profile changes
+            writer = None
+            # Inner retry loop: allows proxy thread time to bind after profile switch.
+            for attempt in range(10):
+                try:
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection("127.0.0.1", video_port), timeout=0.5)
                     break
-                yield chunk
-        except (asyncio.TimeoutError, ConnectionResetError, OSError):
-            pass
-        finally:
+                except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
+                    if attempt == 9:
+                        break
+                    await asyncio.sleep(0.2)
+            if writer is None:
+                # Upstream not ready — pause before outer retry.
+                await asyncio.sleep(1.0)
+                continue
             try:
-                writer.close()
-                await writer.wait_closed()
-            except Exception:
+                writer.write(b"GET /stream HTTP/1.0\r\nHost: localhost\r\n\r\n")
+                await writer.drain()
+                # Read upstream HTTP response headers.
+                header_buf = b""
+                while b"\r\n\r\n" not in header_buf:
+                    chunk = await asyncio.wait_for(reader.read(512), timeout=5.0)
+                    if not chunk:
+                        break
+                    header_buf += chunk
+                if b"\r\n\r\n" not in header_buf:
+                    # Incomplete headers — upstream closed early.
+                    await asyncio.sleep(1.0)
+                    continue
+                sep = header_buf.find(b"\r\n\r\n") + 4
+                if sep < len(header_buf):
+                    yield header_buf[sep:]
+                # Stream body until connection drops or profile changes.
+                while True:
+                    if _video_reconnect_token != token:
+                        break  # sim profile changed — reconnect to new port
+                    chunk = await asyncio.wait_for(reader.read(8192), timeout=10.0)
+                    if not chunk:
+                        break
+                    yield chunk
+            except (asyncio.TimeoutError, ConnectionResetError, OSError):
                 pass
+            finally:
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+            # Brief pause before reconnect to avoid tight loop on persistent failure.
+            await asyncio.sleep(0.5)
 
     return StreamingResponse(stream_mjpeg(), media_type="multipart/x-mixed-replace; boundary=frame")
 
@@ -858,7 +941,7 @@ async def logging_stop():
 
 @app.post("/control/network/start/{profile}")
 async def network_sim_start(profile: str):
-    global active_sim_profile, sim_proxies, active_meta_port, active_lidar_port
+    global active_sim_profile, sim_proxies, active_meta_port, active_lidar_port, _video_reconnect_token
     if profile not in SIM_PROFILE_MAP:
         return JSONResponse({"ok": False, "error": f"Unknown profile: {profile}"}, status_code=400)
 
@@ -878,6 +961,7 @@ async def network_sim_start(profile: str):
     active_sim_profile = profile
     active_meta_port = 9091
     active_lidar_port = 9092
+    _video_reconnect_token += 1  # signal /video to reconnect via proxy
 
     if not args.mock:
         await restart_stream_readers()
@@ -886,13 +970,14 @@ async def network_sim_start(profile: str):
 
 @app.post("/control/network/stop")
 async def network_sim_stop():
-    global active_sim_profile, sim_proxies, active_meta_port, active_lidar_port
+    global active_sim_profile, sim_proxies, active_meta_port, active_lidar_port, _video_reconnect_token
     for p in sim_proxies:
         p.stop()
     sim_proxies.clear()
     active_sim_profile = None
     active_meta_port = args.meta_port
     active_lidar_port = args.lidar_port
+    _video_reconnect_token += 1  # signal /video to reconnect directly to 8090
     if not args.mock:
         await restart_stream_readers()
     return {"ok": True}
@@ -974,7 +1059,6 @@ async def startup():
         meta_reader_task = asyncio.create_task(meta_reader())
         lidar_reader_task = asyncio.create_task(lidar_reader())
         asyncio.create_task(gpu_temp_poller())
-        asyncio.create_task(camera_port_poller())
     asyncio.create_task(telemetry_broadcaster())
     print(f"[dashboard] Serving at http://{args.host}:{args.port}")
 
@@ -1126,6 +1210,31 @@ body::after{
 .dconf{color:var(--txtd);width:30px;font-size:.60rem;}
 .sdiv{border-top:1px solid var(--bdr);margin:5px 0 3px;color:var(--txtd);font-size:.55rem;letter-spacing:.08em;padding-top:3px;}
 .sitem{display:flex;justify-content:space-between;color:var(--txtd);font-size:.60rem;margin-bottom:1px;}
+/* AI Situational Awareness */
+#pAiSa{flex:2.5;}
+#aiWrap{flex:1;position:relative;background:#0d0f0e;overflow:hidden;min-height:0;}
+#aiCanvas{width:100%;height:100%;display:block;}
+#aiOffline{
+  display:none;position:absolute;top:0;left:0;right:0;bottom:0;
+  background:#0d0f0e;align-items:center;justify-content:center;
+  color:var(--amb);font-size:.80rem;letter-spacing:.18em;
+}
+#aiTicker{
+  flex-shrink:0;height:90px;overflow:hidden;padding:3px 6px;
+  border-top:1px solid var(--bdr);font-size:.55rem;
+}
+.aiTick{opacity:0;animation:tickIn .3s forwards;margin-bottom:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+@keyframes tickIn{to{opacity:1;}}
+.aiTick .ts{color:var(--txtd);}
+.aiTick .cnt{color:var(--grn);}
+#aiRate{
+  flex-shrink:0;display:flex;gap:6px;padding:4px 6px;border-top:1px solid var(--bdr);
+  font-size:.55rem;color:var(--txtd);letter-spacing:.06em;
+}
+.aiBar{flex:1;display:flex;flex-direction:column;gap:1px;}
+.aiBarLbl{display:flex;justify-content:space-between;}
+.aiBarTrack{height:6px;background:#111;border:1px solid var(--bdr);overflow:hidden;}
+.aiBarFill{height:100%;transition:width .3s;}
 /* Network panel */
 #pNet{flex:4;}
 #pNet .pb{flex-direction:row;padding:0;align-items:stretch;}
@@ -1345,6 +1454,25 @@ body.degraded #degradedBar{display:flex;}
       </div>
     </div>
 
+    <!-- H: AI Situational Awareness -->
+    <div class="panel" id="pAiSa">
+      <div class="ph">[ &#9672; AI SITUATIONAL AWARENESS ]</div>
+      <div class="pb">
+        <div id="aiWrap"><canvas id="aiCanvas"></canvas><div id="aiOffline">AI STREAM OFFLINE</div></div>
+        <div id="aiTicker"></div>
+        <div id="aiRate">
+          <div class="aiBar">
+            <div class="aiBarLbl"><span>VIDEO</span><span id="aiVidFps">0.0 fps</span></div>
+            <div class="aiBarTrack"><div class="aiBarFill" id="aiVidBar" style="width:0%;background:var(--red);"></div></div>
+          </div>
+          <div class="aiBar">
+            <div class="aiBarLbl"><span>AI META</span><span id="aiMetFps">0.0 fps</span></div>
+            <div class="aiBarTrack"><div class="aiBarFill" id="aiMetBar" style="width:0%;background:var(--grn);"></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- F: Network Analytics -->
     <div class="panel" id="pNet">
       <div class="ph">[ &#9672; NETWORK ANALYTICS ]</div>
@@ -1500,6 +1628,9 @@ function handleTelemetry(d) {
   document.getElementById('dFrame').textContent=String(cam.frame_number).padStart(5,'0');
   renderDets(det.items);
   if (d.session_totals) renderSession(d.session_totals);
+
+  // AI Situational Awareness panel
+  updateAiSa(det, cam);
 
   // LiDAR
   latestLidar=lidar;
@@ -1896,16 +2027,17 @@ function renderSession(totals){
 // ── Video signal ─────────────────────────────────────────────────────────────
 const vfeed = document.getElementById('vfeed');
 
-// FIX: Point directly to port 8090 to bypass Python proxy buffering backlog
-const directVideoUrl = 'http://' + window.location.hostname + ':8090/stream';
-vfeed.src = directVideoUrl;
+// Always use the dashboard's /video endpoint. The server routes internally to
+// port 8090 (direct) or port 9090 (ConstrainedHTTPProxy) based on sim state,
+// so this URL is reachable regardless of where the browser is running.
+vfeed.src = '/video';
 
 let videoRetryTimer = null;
 function scheduleVideoRetry() {
   if (videoRetryTimer) return;
   videoRetryTimer = setTimeout(() => {
     videoRetryTimer = null;
-    vfeed.src = directVideoUrl + '?t=' + Date.now();
+    vfeed.src = '/video?t=' + Date.now();
   }, 5000);
 }
 vfeed.onerror=()=>{
@@ -1957,8 +2089,8 @@ function netStart(profile){
         activeNetProfile=profile;
         updateNetSimUI();
         showToast('SIM ACTIVE: '+profileLabels[profile]);
-        // Route video through the MJPEG-frame-aware constrained proxy on port 9090
-        vfeed.src='http://'+window.location.hostname+':9090/stream?t='+Date.now();
+        // Reconnect /video — server now picks port 9090 (constrained proxy)
+        vfeed.src='/video?t='+Date.now();
       }
     })
     .catch(()=>showToast('Network sim error'));
@@ -1972,8 +2104,8 @@ function netStop(){
         activeNetProfile=null;
         updateNetSimUI();
         showToast('SIMULATION STOPPED');
-        // Restore direct connection to the camera stream on port 8090
-        vfeed.src=directVideoUrl+'?t='+Date.now();
+        // Reconnect /video — server now picks port 8090 (direct)
+        vfeed.src='/video?t='+Date.now();
       }
     })
     .catch(()=>showToast('Network sim error'));
@@ -2063,8 +2195,8 @@ function eStop(){
   logActive=false;
   activeNetProfile=null;
   updateNetSimUI();
-  // Restore direct video connection in case sim proxy was active
-  vfeed.src=directVideoUrl+'?t='+Date.now();
+  // Reconnect /video — drops any active proxy connection
+  vfeed.src='/video?t='+Date.now();
   document.getElementById('logDot').className='sdot d';
   document.getElementById('logSt').textContent='INACTIVE';
   document.getElementById('logBtn').textContent='▶ START';
@@ -2097,6 +2229,90 @@ tick();setInterval(tick,1000);
 // ── Resize tier chart on panel resize ────────────────────────────────────────
 if(window.ResizeObserver){
   new ResizeObserver(drawTierChart).observe(document.getElementById('pNet'));
+}
+
+// ── AI Situational Awareness ─────────────────────────────────────────────────
+const aiCanvas = document.getElementById('aiCanvas');
+const aiCtx = aiCanvas.getContext('2d');
+const aiTicker = document.getElementById('aiTicker');
+const aiTickerItems = [];
+let aiLastTs = 0;
+
+function resizeAiCanvas() {
+  const wrap = document.getElementById('aiWrap');
+  if (!wrap) return;
+  aiCanvas.width = wrap.clientWidth;
+  aiCanvas.height = wrap.clientHeight;
+}
+resizeAiCanvas();
+if (window.ResizeObserver) {
+  new ResizeObserver(resizeAiCanvas).observe(document.getElementById('aiWrap'));
+}
+
+function updateAiSa(det, cam) {
+  const offline = cam.last_seen_s > 2;
+  document.getElementById('aiOffline').style.display = offline ? 'flex' : 'none';
+  aiCanvas.style.display = offline ? 'none' : 'block';
+
+  // Draw bounding boxes
+  const ctx = aiCtx;
+  const cw = aiCanvas.width, ch = aiCanvas.height;
+  if (cw === 0 || ch === 0) return;
+  ctx.clearRect(0, 0, cw, ch);
+
+  const fw = cam.frame_w || 640, fh = cam.frame_h || 480;
+  const sx = cw / fw, sy = ch / fh;
+
+  for (const d of (det.items || [])) {
+    if (!d.bbox) continue;
+    const [x1, y1, x2, y2] = d.bbox;
+    const conf = d.confidence;
+    const col = conf > 0.8 ? '#00ff88' : conf > 0.5 ? '#ffaa00' : '#ff3333';
+
+    const rx = x1 * sx, ry = y1 * sy, rw = (x2 - x1) * sx, rh = (y2 - y1) * sy;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(rx, ry, rw, rh);
+
+    // Label background
+    const label = d.class + ' ' + Math.round(conf * 100) + '%';
+    ctx.font = '11px "JetBrains Mono", monospace';
+    const tw = ctx.measureText(label).width;
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(rx, ry - 15, tw + 6, 15);
+    ctx.fillStyle = col;
+    ctx.fillText(label, rx + 3, ry - 3);
+  }
+
+  // Ticker
+  if (det.count > 0) {
+    const now = Date.now();
+    const delta = aiLastTs ? ((now - aiLastTs) / 1000).toFixed(2) : '0.00';
+    aiLastTs = now;
+    const descs = (det.items || []).map(d => {
+      const col = d.confidence > 0.8 ? '#00ff88' : d.confidence > 0.5 ? '#ffaa00' : '#ff3333';
+      return '<span style="color:' + col + '">' + d.class + ' (' + Math.round(d.confidence * 100) + '%)</span>';
+    }).join(', ');
+    const entry = '<div class="aiTick"><span class="ts">[+' + delta + 's]</span> '
+      + '<span class="cnt">' + det.count + ' obj</span>: ' + descs + '</div>';
+    aiTickerItems.unshift(entry);
+    if (aiTickerItems.length > 8) aiTickerItems.length = 8;
+    aiTicker.innerHTML = aiTickerItems.join('');
+  }
+
+  // Stream rate comparison bars
+  const vFps = cam.fps || 0;
+  const mFps = cam.meta_fps || 0;
+  const vPct = Math.min(100, (vFps / 30) * 100);
+  const mPct = Math.min(100, (mFps / 30) * 100);
+  document.getElementById('aiVidFps').textContent = vFps.toFixed(1) + ' fps';
+  document.getElementById('aiMetFps').textContent = mFps.toFixed(1) + ' fps';
+  const vBar = document.getElementById('aiVidBar');
+  const mBar = document.getElementById('aiMetBar');
+  vBar.style.width = vPct + '%';
+  mBar.style.width = mPct + '%';
+  vBar.style.background = vPct < 30 ? 'var(--red)' : vPct < 60 ? 'var(--amb)' : 'var(--grn)';
+  mBar.style.background = mPct < 30 ? 'var(--red)' : mPct < 60 ? 'var(--amb)' : 'var(--grn)';
 }
 </script>
 
