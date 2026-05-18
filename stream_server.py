@@ -227,11 +227,15 @@ class MJPEGHandler(BaseHTTPRequestHandler):
             self.end_headers()
             try:
                 while True:
-                    frame_event.wait(timeout=2.0)
-                    with latest_frame_lock:
-                        jpeg = latest_jpeg
-                    if jpeg is None:
-                        continue
+                    if not video_output_enabled:
+                        jpeg = _black_jpeg
+                        time.sleep(1.0)
+                    else:
+                        frame_event.wait(timeout=2.0)
+                        with latest_frame_lock:
+                            jpeg = latest_jpeg
+                        if jpeg is None:
+                            continue
                     try:
                         self.wfile.write(b"--frame\r\n")
                         self.wfile.write(b"Content-Type: image/jpeg\r\n")
@@ -333,6 +337,38 @@ def read_gpu_temp():
 
 _shutdown = threading.Event()
 
+video_output_enabled = True
+_black_jpeg = cv2.imencode(
+    '.jpg', np.zeros((480, 640, 3), dtype=np.uint8))[1].tobytes()
+
+
+class ControlHandler(BaseHTTPRequestHandler):
+    """Tiny control endpoint: GET /video/enable, /video/disable."""
+
+    def do_GET(self):
+        global video_output_enabled
+        if self.path == "/video/enable":
+            video_output_enabled = True
+            self._respond(b"enabled")
+        elif self.path == "/video/disable":
+            video_output_enabled = False
+            self._respond(b"disabled")
+        else:
+            self.send_error(404)
+
+    def _respond(self, body):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+
+def run_control_server(port):
+    HTTPServer(("0.0.0.0", port), ControlHandler).serve_forever()
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -350,6 +386,8 @@ def main():
                         help="MJPEG HTTP port (default: 8090)")
     parser.add_argument("--meta-port", type=int, default=8091,
                         help="TCP metadata port (default: 8091)")
+    parser.add_argument("--control-port", type=int, default=8095,
+                        help="HTTP control port for video toggle (default: 8095)")
     parser.add_argument("--jpeg-quality", type=int, default=30,
                         help="JPEG quality 1-100 (default: 30)")
     parser.add_argument("--log", default=None,
@@ -383,6 +421,11 @@ def main():
     meta_thread = threading.Thread(
         target=run_metadata_server, args=(args.meta_port,), daemon=True)
     meta_thread.start()
+
+    print(f"Starting control server on :{args.control_port}")
+    ctrl_thread = threading.Thread(
+        target=run_control_server, args=(args.control_port,), daemon=True)
+    ctrl_thread.start()
 
     def handle_signal(sig, _frame):
         _shutdown.set()
