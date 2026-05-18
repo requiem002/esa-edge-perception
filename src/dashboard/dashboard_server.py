@@ -367,6 +367,7 @@ session_totals: dict = {}
 logging_enabled: bool = False
 ai_stream_enabled: bool = True
 _baseline_fps: float = 28.0
+_video_output_enabled: bool = True
 ws_clients: set = set()
 
 network_state = {
@@ -717,7 +718,8 @@ def build_telemetry() -> dict:
     l_alive = l_last < 5.0 and lidar_state["active"]
 
     ai_alive = ai_stream_enabled
-    n_alive = sum([cam_alive, ai_alive, l_alive])
+    video_alive = cam_alive and _video_output_enabled
+    n_alive = sum([video_alive, ai_alive, l_alive])
     if n_alive == 3:
         sys_state = "online"
     elif n_alive > 0:
@@ -787,7 +789,7 @@ def build_telemetry() -> dict:
             "uptime_s": round(now - START_TIME, 1),
         },
         "streams": {
-            "video_alive": cam_alive,   # camera MJPEG port 8090
+            "video_alive": video_alive,
             "ai_alive": ai_alive,       # AI SA stream (toggle on = alive)
             "lidar_alive": l_alive,     # LiDAR stream port 8092
         },
@@ -907,6 +909,19 @@ async def _port_open(host: str, port: int) -> bool:
     except Exception:
         return False
 
+async def _http_get(host: str, port: int, path: str, timeout: float = 2.0) -> bool:
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=timeout)
+        writer.write(f"GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n".encode())
+        await writer.drain()
+        resp = await asyncio.wait_for(reader.read(256), timeout=timeout)
+        writer.close()
+        await writer.wait_closed()
+        return b"200" in resp[:32]
+    except Exception:
+        return False
+
 @app.get("/control/status")
 async def control_status():
     cam = await _port_open("127.0.0.1", 8090)
@@ -917,19 +932,27 @@ async def control_status():
 
 @app.post("/control/camera/start")
 async def camera_start():
+    global _video_output_enabled
     if args.mock:
+        _video_output_enabled = True
         return {"ok": True}
-    await asyncio.create_subprocess_exec(
-        "docker", "exec", "-d", "yolo-saad", "python3", "/workspace/stream_server.py")
+    meta_up = await _port_open("127.0.0.1", 8091)
+    if meta_up:
+        await _http_get("127.0.0.1", 8095, "/video/enable")
+    else:
+        await asyncio.create_subprocess_exec(
+            "docker", "exec", "-d", "yolo-saad", "python3", "/workspace/stream_server.py")
+    _video_output_enabled = True
     return {"ok": True}
 
 @app.post("/control/camera/stop")
 async def camera_stop():
+    global _video_output_enabled
     if args.mock:
+        _video_output_enabled = False
         return {"ok": True}
-    p = await asyncio.create_subprocess_exec(
-        "docker", "exec", "yolo-saad", "pkill", "-f", "stream_server.py")
-    await p.wait()
+    await _http_get("127.0.0.1", 8095, "/video/disable")
+    _video_output_enabled = False
     return {"ok": True}
 
 @app.post("/control/lidar/start")
