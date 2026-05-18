@@ -8,7 +8,9 @@ Runs INSIDE the Docker container (yolo-saad). Provides:
 
 Usage (inside container):
     python3 /workspace/stream_server.py
-    python3 /workspace/stream_server.py --model /workspace/yolo26n.engine --port 8090
+    python3 /workspace/stream_server.py --source go2stream --go2-interface eth0
+    python3 /workspace/stream_server.py --source file:/workspace/test.mp4
+    python3 /workspace/stream_server.py --source rtsp://192.168.1.100:8554/live
 """
 
 import argparse
@@ -42,6 +44,170 @@ BOX_COLORS = {
     "truck":      (128, 0, 255),
     "bus":        (255, 128, 0),
 }
+
+# ─── Video Source Abstraction ─────────────────────────────────────────────────
+
+def make_webcam_source(device=0):
+    """USB webcam via cv2.VideoCapture. Default source."""
+    cap = cv2.VideoCapture(device)
+    if not cap.isOpened():
+        sys.exit(f"[ERROR] Cannot open webcam device {device}")
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    print(f"[SRC] Webcam opened: {w}x{h}")
+
+    def gen():
+        nonlocal cap
+        while not _shutdown.is_set():
+            ret, frame = cap.read()
+            if not ret:
+                print("[WARN] Webcam read failed, retrying...")
+                cap.release()
+                time.sleep(1)
+                cap = cv2.VideoCapture(device)
+                continue
+            yield True, frame
+        cap.release()
+
+    return w, h, gen()
+
+
+# Go2 onboard camera via unitree_sdk2py VideoClient RPC.
+# WARNING: GetImageSample() stalls intermittently with error 3104 during
+# continuous streaming (unitree_sdk2 issue #116). Use --source go2stream
+# for reliable continuous capture.
+# --go2-interface must match the Ethernet interface connected to the Go2
+# (default eth0). The Go2 must be powered on and connected via Ethernet
+# before launching stream_server.py with --source go2.
+def make_go2_source(interface="eth0"):
+    from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+    from unitree_sdk2py.go2.video.video_client import VideoClient
+
+    ChannelFactoryInitialize(0, interface)
+    client = VideoClient()
+    client.SetTimeout(3.0)
+    client.Init()
+    print(f"[SRC] Go2 VideoClient initialised on interface {interface}")
+
+    w, h = 640, 480
+
+    def gen():
+        while not _shutdown.is_set():
+            code, data = client.GetImageSample()
+            if code == 0 and data:
+                frame = cv2.imdecode(
+                    np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+                if frame is not None:
+                    yield True, frame
+                    continue
+            yield False, None
+
+    return w, h, gen()
+
+
+def make_go2stream_source(interface="eth0"):
+    """Go2 H.264 RTP multicast via GStreamer — reliable for continuous streaming."""
+    pipeline = (
+        f"udpsrc address=230.1.1.1 port=1720 "
+        f"multicast-iface={interface} ! queue ! "
+        "application/x-rtp,media=video,encoding-name=H264 ! "
+        "rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! "
+        "video/x-raw,format=BGR ! appsink drop=1 max-buffers=1"
+    )
+    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+    if not cap.isOpened():
+        sys.exit(f"[ERROR] Cannot open Go2 H.264 multicast stream on {interface}")
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+    print(f"[SRC] Go2 H.264 multicast on {interface}: {w}x{h}")
+
+    def gen():
+        nonlocal cap
+        while not _shutdown.is_set():
+            ret, frame = cap.read()
+            if not ret:
+                print("[WARN] Go2 stream read failed, reconnecting...")
+                cap.release()
+                time.sleep(2)
+                cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+                continue
+            yield True, frame
+        cap.release()
+
+    return w, h, gen()
+
+
+def make_file_source(path):
+    """Video file, loops on end."""
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        sys.exit(f"[ERROR] Cannot open video file: {path}")
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    print(f"[SRC] File opened: {path} ({w}x{h})")
+
+    def gen():
+        nonlocal cap
+        while not _shutdown.is_set():
+            ret, frame = cap.read()
+            if not ret:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                continue
+            yield True, frame
+        cap.release()
+
+    return w, h, gen()
+
+
+def make_rtsp_source(url):
+    """RTSP stream, reconnects on failure."""
+    cap = cv2.VideoCapture(url)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    if not cap.isOpened():
+        print(f"[WARN] Cannot open RTSP stream: {url}, will retry...")
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+    print(f"[SRC] RTSP: {url} ({w}x{h})")
+
+    def gen():
+        nonlocal cap, w, h
+        while not _shutdown.is_set():
+            if not cap.isOpened():
+                time.sleep(2)
+                cap = cv2.VideoCapture(url)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                if cap.isOpened():
+                    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or w
+                    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or h
+                continue
+            ret, frame = cap.read()
+            if not ret:
+                cap.release()
+                continue
+            yield True, frame
+        cap.release()
+
+    return w, h, gen()
+
+
+def open_source(source_str, go2_interface="eth0"):
+    """Parse --source value and return (width, height, frame_generator)."""
+    if source_str == "webcam":
+        return make_webcam_source(0)
+    elif source_str == "go2":
+        return make_go2_source(go2_interface)
+    elif source_str == "go2stream":
+        return make_go2stream_source(go2_interface)
+    elif source_str.startswith("file:"):
+        return make_file_source(source_str[5:])
+    elif source_str.startswith("rtsp:"):
+        return make_rtsp_source(source_str[5:])
+    else:
+        sys.exit(f"[ERROR] Unknown source: {source_str}\n"
+                 f"  Valid: webcam | go2 | go2stream | file:<path> | rtsp:<url>")
+
+
+# ─── Shared State ────────────────────────────────────────────────────────────
 
 # Shared state between inference thread and HTTP/TCP servers
 latest_frame_lock = threading.Lock()
@@ -173,8 +339,11 @@ def main():
         description="YOLO streaming server for network experiments")
     parser.add_argument("--model", default="/workspace/yolo26n.engine",
                         help="YOLO model path (default: yolo26n.engine)")
-    parser.add_argument("--source", default="0",
-                        help="Camera source (default: 0)")
+    parser.add_argument("--source", default="webcam",
+                        help="Video source: webcam | go2 | go2stream | "
+                             "file:<path> | rtsp:<url> (default: webcam)")
+    parser.add_argument("--go2-interface", default="eth0",
+                        help="Network interface for Go2 DDS (default: eth0)")
     parser.add_argument("--conf", type=float, default=0.25,
                         help="Confidence threshold")
     parser.add_argument("--port", type=int, default=8090,
@@ -188,8 +357,6 @@ def main():
                              "(e.g. /workspace/server_log.csv)")
     args = parser.parse_args()
 
-    source = int(args.source) if args.source.isdigit() else args.source
-
     # Load model
     model_path = args.model
     p = Path(model_path)
@@ -201,14 +368,10 @@ def main():
     print(f"Loading model: {model_path}")
     model = YOLO(model_path)
 
-    # Open camera
-    print(f"Opening camera: {source}")
-    cap = cv2.VideoCapture(source)
-    if not cap.isOpened():
-        sys.exit(f"[ERROR] Cannot open camera {source}")
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    print(f"Camera opened: {w}x{h}")
+    # Open video source
+    print(f"Opening source: {args.source}")
+    w, h, frames = open_source(args.source, args.go2_interface)
+    print(f"Source ready: {w}x{h}")
 
     # Start servers
     print(f"Starting MJPEG server on :{args.port}")
@@ -253,13 +416,10 @@ def main():
     print(f"Metadata on TCP :{args.meta_port}")
     print("Press Ctrl+C to stop.\n")
 
-    while not _shutdown.is_set():
-        ret, frame = cap.read()
+    for ret, frame in frames:
+        if _shutdown.is_set():
+            break
         if not ret:
-            print("[WARN] Camera read failed, retrying...")
-            cap.release()
-            time.sleep(1)
-            cap = cv2.VideoCapture(source)
             continue
 
         frame_count += 1
@@ -358,7 +518,6 @@ def main():
                   f"Det: {total}  |  Infer: {inference_ms:.1f}ms{temp_tag}    ",
                   end="\r")
 
-    cap.release()
     if log_file:
         log_file.close()
     print(f"\n\nStopped after {frame_count} frames.")

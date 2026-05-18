@@ -15,6 +15,13 @@
 #   ./run.sh --conf 0.4 --source /workspace/test.mp4
 #   ./run.sh --no-display --thermal-throttle 80
 #
+# stream_server.py video sources (--stream mode):
+#   ./run.sh --stream                                     webcam (default)
+#   ./run.sh --stream --source go2 --go2-interface eth0   Go2 VideoClient RPC (may stall)
+#   ./run.sh --stream --source go2stream --go2-interface eth0  Go2 H.264 multicast (recommended)
+#   ./run.sh --stream --source file:/workspace/test.mp4   video file (loops)
+#   ./run.sh --stream --source rtsp://host:8554/live      RTSP stream
+#
 # Requires: yolo-saad container (started automatically if stopped),
 # camera at /dev/video0, optional LIDAR at /dev/ttyTHS1.
 
