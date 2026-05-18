@@ -365,6 +365,8 @@ frame_window: deque = deque()   # (ts, frame_number, jpeg_bytes)
 lidar_bw_window: deque = deque()  # (ts, num_points)
 session_totals: dict = {}
 logging_enabled: bool = False
+ai_stream_enabled: bool = True
+_baseline_fps: float = 28.0
 ws_clients: set = set()
 
 network_state = {
@@ -467,7 +469,7 @@ def compute_network_metrics():
 
     video_bw_kbps = (jpeg_bytes * fps) / 1000.0 if fps > 0 else 0.0
     lidar_bw_kbps = (num_points * 12 * hz) / 1000.0
-    meta_bw_kbps = (200.0 * fps) / 1000.0
+    meta_bw_kbps = (200.0 * fps) / 1000.0 if ai_stream_enabled else 0.0
     total_bw_kbps = video_bw_kbps + lidar_bw_kbps + meta_bw_kbps
 
     e2e_latency_ms = meta_state["inference_ms"]
@@ -483,12 +485,26 @@ def compute_network_metrics():
     else:
         frame_loss_pct = 0.0
 
-    fps_score = min(fps / 30.0, 1.0) * 100
-    latency_score = max(0.0, 100.0 - e2e_latency_ms / 10.0)
-    delivery_score = (1.0 - frame_loss_pct / 100.0) * 100.0
-    quality_score = round(0.4 * fps_score + 0.3 * latency_score + 0.3 * delivery_score)
-
-    inferred, confidence = infer_profile(fps, e2e_latency_ms)
+    global _baseline_fps
+    if active_sim_profile:
+        # When sim is active, derive metrics from the video proxy (actual
+        # delivered frame rate) and the configured profile delay, not the
+        # metadata stream which barely degrades.
+        proxy_fps = next(
+            (p.fps for p in sim_proxies if isinstance(p, ConstrainedHTTPProxy)), 0.0)
+        profile_delay = SIM_PROFILE_MAP.get(active_sim_profile, {}).get("delay_ms", 0)
+        e2e_latency_ms = profile_delay + meta_state["inference_ms"]
+        quality_score = round(max(0.0, min(100.0, (proxy_fps / _baseline_fps) * 100.0)))
+        inferred = SIM_PROFILE_LABELS.get(active_sim_profile, "Unknown")
+        confidence = 1.0
+    else:
+        if fps > 5.0:
+            _baseline_fps = 0.9 * _baseline_fps + 0.1 * fps
+        fps_score = min(fps / 30.0, 1.0) * 100
+        latency_score = max(0.0, 100.0 - e2e_latency_ms / 10.0)
+        delivery_score = (1.0 - frame_loss_pct / 100.0) * 100.0
+        quality_score = round(0.4 * fps_score + 0.3 * latency_score + 0.3 * delivery_score)
+        inferred, confidence = infer_profile(fps, e2e_latency_ms)
 
     network_state.update({
         "video_bw_kbps": round(video_bw_kbps, 1),
@@ -700,7 +716,8 @@ def build_telemetry() -> dict:
     cam_alive = True if args.mock else m_alive
     l_alive = l_last < 5.0 and lidar_state["active"]
 
-    n_alive = sum([cam_alive, m_alive, l_alive])
+    ai_alive = ai_stream_enabled
+    n_alive = sum([cam_alive, ai_alive, l_alive])
     if n_alive == 3:
         sys_state = "online"
     elif n_alive > 0:
@@ -711,20 +728,24 @@ def build_telemetry() -> dict:
     if not args.mock:
         compute_network_metrics()
 
-    det_items = [
-        {k: d[k] for k in ("class", "confidence", "bbox") if k in d}
-        for d in meta_state["detections"]
-    ]
-    det_classes: dict = {}
-    for d in det_items:
-        det_classes[d["class"]] = det_classes.get(d["class"], 0) + 1
+    if ai_stream_enabled:
+        det_items = [
+            {k: d[k] for k in ("class", "confidence", "bbox") if k in d}
+            for d in meta_state["detections"]
+        ]
+        det_classes: dict = {}
+        for d in det_items:
+            det_classes[d["class"]] = det_classes.get(d["class"], 0) + 1
+    else:
+        det_items = []
+        det_classes = {}
 
     active_label = SIM_PROFILE_LABELS.get(active_sim_profile) if active_sim_profile else None
 
     # meta_fps: raw metadata delivery rate (always ~30; survives degraded links
     # because metadata messages are tiny). video_fps: actual video frame rate
     # the browser sees (throttled by proxy when sim is active).
-    meta_fps = meta_state["fps"] if m_alive else 0.0
+    meta_fps = (meta_state["fps"] if m_alive else 0.0) if ai_stream_enabled else 0.0
     if active_sim_profile:
         video_fps = next(
             (p.fps for p in sim_proxies if isinstance(p, ConstrainedHTTPProxy)), 0.0
@@ -767,11 +788,12 @@ def build_telemetry() -> dict:
         },
         "streams": {
             "video_alive": cam_alive,   # camera MJPEG port 8090
-            "meta_alive": m_alive,      # metadata stream port 8091
+            "ai_alive": ai_alive,       # AI SA stream (toggle on = alive)
             "lidar_alive": l_alive,     # LiDAR stream port 8092
         },
         "network": dict(network_state),
         "session_totals": session_totals,
+        "ai_stream_enabled": ai_stream_enabled,
     }
 
 # ─── WebSocket ────────────────────────────────────────────────────────────────
@@ -832,7 +854,8 @@ async def proxy_video():
                 except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
                     if attempt == 9:
                         break
-                    await asyncio.sleep(0.2)
+                    if attempt > 0:
+                        await asyncio.sleep(0.2)
             if writer is None:
                 # Upstream not ready — pause before outer retry.
                 await asyncio.sleep(1.0)
@@ -935,6 +958,18 @@ async def logging_start():
 async def logging_stop():
     global logging_enabled
     logging_enabled = False
+    return {"ok": True}
+
+@app.post("/control/aistream/start")
+async def aistream_start():
+    global ai_stream_enabled
+    ai_stream_enabled = True
+    return {"ok": True}
+
+@app.post("/control/aistream/stop")
+async def aistream_stop():
+    global ai_stream_enabled
+    ai_stream_enabled = False
     return {"ok": True}
 
 # ─── Network Simulation ───────────────────────────────────────────────────────
@@ -1367,6 +1402,14 @@ body.degraded #degradedBar{display:flex;}
         </div>
 
         <div class="csec">
+          <div class="clbl">AI STREAM</div>
+          <div class="crow">
+            <span><span class="sdot g" id="aiDot">&#9679;</span> <span id="aiSt">RUNNING</span></span>
+            <button class="cbtn stp" id="aiBtn" onclick="aiToggle()">&#9632; STOP</button>
+          </div>
+        </div>
+
+        <div class="csec">
           <div class="clbl">DATA LOGGING</div>
           <div class="crow">
             <span><span class="sdot d" id="logDot">&#9675;</span> <span id="logSt">INACTIVE</span></span>
@@ -1595,7 +1638,7 @@ function handleTelemetry(d) {
   document.body.classList.toggle('offline', d.system_state==='offline');
   document.body.classList.toggle('degraded', d.system_state==='degraded');
 
-  const alive=[st.video_alive,st.meta_alive,st.lidar_alive].filter(Boolean).length;
+  const alive=[st.video_alive,st.ai_alive,st.lidar_alive].filter(Boolean).length;
   if (d.system_state==='degraded') {
     document.getElementById('degradedMsg').textContent='DEGRADED — '+alive+'/3 STREAMS ACTIVE';
   }
@@ -1630,7 +1673,7 @@ function handleTelemetry(d) {
   if (d.session_totals) renderSession(d.session_totals);
 
   // AI Situational Awareness panel
-  updateAiSa(det, cam);
+  updateAiSa(det, cam, d.ai_stream_enabled);
 
   // LiDAR
   latestLidar=lidar;
@@ -1646,7 +1689,7 @@ function handleTelemetry(d) {
     ['hVid','hMeta','hLidar'].forEach(id=>document.getElementById(id).className='hdot r');
   } else {
     healthDot('hVid', st.video_alive?cam.last_seen_s:999);
-    healthDot('hMeta', st.meta_alive?cam.last_seen_s:999);
+    healthDot('hMeta', st.ai_alive?cam.last_seen_s:999);
     healthDot('hLidar', st.lidar_alive?lidar.last_seen_s:999);
   }
 
@@ -2185,6 +2228,15 @@ function logToggle(){
   document.getElementById('logBtn').textContent=logActive?'■ STOP':'▶ START';
   document.getElementById('logBtn').className='cbtn'+(logActive?' stp':'');
 }
+let aiStreamActive=true;
+function aiToggle(){
+  aiStreamActive=!aiStreamActive;
+  fetch('/control/aistream/'+(aiStreamActive?'start':'stop'),{method:'POST'});
+  document.getElementById('aiDot').className='sdot '+(aiStreamActive?'g':'d');
+  document.getElementById('aiSt').textContent=aiStreamActive?'RUNNING':'STOPPED';
+  document.getElementById('aiBtn').textContent=aiStreamActive?'■ STOP':'▶ START';
+  document.getElementById('aiBtn').className='cbtn'+(aiStreamActive?' stp':'');
+}
 function eStop(){
   Promise.all([
     fetch('/control/camera/stop',{method:'POST'}),
@@ -2249,10 +2301,30 @@ if (window.ResizeObserver) {
   new ResizeObserver(resizeAiCanvas).observe(document.getElementById('aiWrap'));
 }
 
-function updateAiSa(det, cam) {
-  const offline = cam.last_seen_s > 2;
-  document.getElementById('aiOffline').style.display = offline ? 'flex' : 'none';
-  aiCanvas.style.display = offline ? 'none' : 'block';
+function updateAiSa(det, cam, aiEnabled) {
+  const disabled = aiEnabled === false;
+  const offline = !disabled && cam.last_seen_s > 2;
+  const aiOff = document.getElementById('aiOffline');
+  if (disabled) {
+    aiOff.textContent = 'AI STREAM DISABLED';
+    aiOff.style.display = 'flex';
+    aiCanvas.style.display = 'none';
+  } else if (offline) {
+    aiOff.textContent = 'AI STREAM OFFLINE';
+    aiOff.style.display = 'flex';
+    aiCanvas.style.display = 'none';
+  } else {
+    aiOff.style.display = 'none';
+    aiCanvas.style.display = 'block';
+  }
+  // Sync toggle UI from server state
+  if (disabled !== !aiStreamActive) {
+    aiStreamActive = !disabled;
+    document.getElementById('aiDot').className = 'sdot ' + (aiStreamActive ? 'g' : 'd');
+    document.getElementById('aiSt').textContent = aiStreamActive ? 'RUNNING' : 'STOPPED';
+    document.getElementById('aiBtn').textContent = aiStreamActive ? '■ STOP' : '▶ START';
+    document.getElementById('aiBtn').className = 'cbtn' + (aiStreamActive ? ' stp' : '');
+  }
 
   // Draw bounding boxes
   const ctx = aiCtx;
